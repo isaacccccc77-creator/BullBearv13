@@ -1,0 +1,10 @@
+streamlit
+yfinance
+pandas
+numpy
+plotly
+vaderSentiment
+requests
+bcrypt
+pyotp
+qrcode[pil]
