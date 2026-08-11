@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
 <title>QuizIt — Study From Your Notes</title>
 <meta name="description" content="Paste your notes and instantly get flashcards and quizzes. Works offline, installs to your home screen." />
-<meta name="theme-color" content="#0f0a1f" />
+<meta name="theme-color" content="#14100f" />
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -16,19 +16,41 @@
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+<canvas id="confetti-canvas"></canvas>
 <div id="toast" class="toast" aria-live="polite"></div>
 
 <!-- HOME -->
 <section id="screen-home" class="screen active">
   <header class="topbar">
     <div class="brand"><span class="bolt">⚡</span> QuizIt</div>
+    <div class="header-chips">
+      <span id="streak-chip" class="chip streak-chip"><span class="flame-emoji">🔥</span> <span id="streak-count">0</span></span>
+      <span id="level-chip" class="chip level-chip">Lv <span id="level-num">1</span></span>
+    </div>
   </header>
 
   <main class="home-main">
+    <div class="xp-block">
+      <div class="xp-row"><span>XP</span><b id="xp-label">0 / 100 to next level</b></div>
+      <div class="xpbar-track"><div id="xp-fill" class="xpbar-fill" style="width:0%;"></div></div>
+    </div>
+
+    <div id="badges-wrap" class="hidden">
+      <div id="badges-row" class="badges-row"></div>
+    </div>
+
     <div id="install-banner" class="install-banner hidden">
       <span id="install-banner-text">Install QuizIt for the full app experience.</span>
       <button id="install-btn" class="btn btn-small">Install</button>
       <button id="install-dismiss" class="icon-btn" aria-label="Dismiss">✕</button>
+    </div>
+
+    <div class="reminder-row">
+      <div class="reminder-text">
+        <div class="reminder-title">🔔 Streak reminder</div>
+        <div class="reminder-sub" id="reminder-sub">Nudge me if I haven't studied yet today. Local only — works when you open the app, not a push notification.</div>
+      </div>
+      <div id="reminder-switch" class="switch" role="switch" aria-checked="false" tabindex="0"></div>
     </div>
 
     <div class="card-panel">
@@ -65,9 +87,11 @@
   </header>
   <main class="center-main">
     <div class="summary-badge" id="summary-count">0</div>
-    <p class="summary-sub">questions generated</p>
+    <p class="summary-sub">questions in this deck</p>
+    <div id="due-callout" class="due-callout">0 due for review</div>
     <div class="mode-choice">
-      <button id="start-flashcards" class="btn btn-primary btn-full">📇 Study flashcards</button>
+      <button id="start-smart-review" class="btn btn-primary btn-full">🔥 Smart Review</button>
+      <button id="start-flashcards" class="btn btn-secondary btn-full">📇 Study all flashcards</button>
       <button id="start-mcq" class="btn btn-secondary btn-full">📝 Take quiz</button>
     </div>
     <button id="summary-delete" class="btn btn-text">Delete this deck</button>
@@ -130,6 +154,7 @@
     <div class="results-emoji" id="results-emoji">🎉</div>
     <div class="summary-badge" id="results-score">0/0</div>
     <p class="summary-sub" id="results-sub">Nice work!</p>
+    <div id="results-extras" class="results-extras"></div>
     <div id="missed-wrap" class="missed-wrap hidden">
       <h2 class="section-title">Review misses</h2>
       <div id="missed-list" class="missed-list"></div>

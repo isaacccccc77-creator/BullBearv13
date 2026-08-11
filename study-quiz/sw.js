@@ -1,4 +1,4 @@
-const CACHE = "quizit-v1";
+const CACHE = "quizit-v2";
 const SHELL = [
   "./",
   "./index.html",
