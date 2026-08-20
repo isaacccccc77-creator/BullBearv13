@@ -69,6 +69,22 @@ data source and its delay, the ticker currently loaded, whether explain mode
 is on, and the render time. No fake "LIVE" indicator over a 15-minute-delayed
 free feed.
 
+## Navigation
+
+The command bar is **global** — it sits above the tab rail, not inside a tab.
+That's load-bearing, not cosmetic. It used to live inside Analysis, which
+meant Fundamentals and Factor Score showed "enter a ticker in the command bar
+above" while pointing at a control on a different tab, and each tool tab
+carried its own ticker field, so you could analyse AAPL and plan a trade on
+MSFT with nothing flagging the mismatch. One instrument, set in one place,
+read by every tab; tabs that follow it say so with a context chip.
+
+Tabs are ordered by kind: instrument-scoped views (Analysis, Fundamentals,
+Factor Score), then tools (Trade Setup, Journal, Watchlist, Daily Digest),
+then reference (Multi-Asset, Calendar, Settings). Market News was removed as a
+top-level tab — it held one collapsed accordion on an otherwise empty screen —
+and now sits under the ticker-specific news in Analysis.
+
 ## Mobile
 
 The phone layout is a designed target, not a shrunken desktop. Three things

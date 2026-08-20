@@ -1371,6 +1371,40 @@ hr, [data-testid="stDivider"] hr {
 .tv-tick-chg.neg { color: var(--rose); }
 
 /* ==================================================================
+   CONTEXT CHIP — "you are acting on AAPL"
+
+   Shown by tabs that follow the global command bar instead of carrying
+   their own ticker field. Stating the instrument costs one line and
+   removes the whole class of error where you analyse one stock and plan
+   a trade on another.
+   ================================================================== */
+.tv-context {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.6rem 0.9rem;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    border-left: 2px solid var(--gold-500);
+    background: rgba(212, 176, 120, 0.05);
+    font-family: var(--font-ui);
+    font-size: 0.82rem;
+    color: var(--text-300);
+}
+.tv-context b {
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    color: var(--gold-300);
+    letter-spacing: 0.02em;
+}
+.tv-context span {
+    font-size: 0.6rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--text-500);
+}
+
+/* ==================================================================
    EXPLAIN MODE — the plain-English gloss under a dense panel
    ================================================================== */
 .tv-explain {
@@ -2183,109 +2217,130 @@ def save_digest_snapshot(snapshot: dict) -> None:
         pass  # non-critical — worst case, it just doesn't persist this time
 
 
+# ----------------------------------------------------------------------
+# COMMAND BAR — global, and deliberately OUTSIDE the tab set.
+#
+# It used to live inside the Analysis tab, which broke the app's core mental
+# model in two ways. Fundamentals and Factor Score depend on it, so their
+# empty state read "enter a ticker in the command bar above" while pointing
+# at a control that was on a different tab and therefore not on screen at
+# all. And because each tool tab carried its own ticker field, you could
+# analyse AAPL and then plan a trade on MSFT with nothing flagging the
+# mismatch — in a tool about stop levels and position sizing, that is the
+# worst outcome the interface can produce.
+#
+# A terminal has one command line and many views of the result. This is that
+# command line: one instrument, set in one place, visible from every tab.
+# ----------------------------------------------------------------------
+
+# International markets: yfinance reaches these via ticker suffixes.
+# We auto-append the right one so you can just type the base symbol.
+MARKET_SUFFIX_MAP = {
+    "US (default)": "",
+    "Hong Kong (HKEX)": ".HK",
+    "South Korea — KOSPI": ".KS",
+    "South Korea — KOSDAQ": ".KQ",
+    "Singapore (SGX)": ".SI",
+}
+CHART_OPTIONS = ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"]
+# Maps each display option to a (yfinance period, yfinance interval) pair.
+# 1d/5d use intraday bars WITH pre/post-market data included (prepost=True)
+# so the chart doesn't just flatline at the last regular-session close —
+# it reflects overnight/extended-hours trading where available.
+CHART_PERIOD_MAP = {
+    "1d": ("1d", "5m"),
+    "5d": ("5d", "15m"),
+    "1mo": ("1mo", "1d"),
+    "3mo": ("3mo", "1d"),
+    "6mo": ("6mo", "1d"),
+    "1y": ("1y", "1d"),
+    "2y": ("2y", "1d"),
+    "5y": ("5y", "1d"),
+}
+
+# Everything needed to run an analysis sits in one form, so adjusting a
+# dropdown or slider doesn't trigger a rerun until you're ready to go.
+with st.form("command_bar"):
+    cb_col1, cb_col2, cb_col3, cb_col4 = st.columns([1.1, 2.2, 1, 1.4])
+    with cb_col1:
+        market_choice = st.selectbox(
+            "Market",
+            options=list(MARKET_SUFFIX_MAP.keys()),
+            help="Pick a market and just type the base ticker/code — the right suffix is added "
+                 "automatically. E.g. Hong Kong: '0700' becomes '0700.HK'.",
+        )
+    with cb_col2:
+        raw_ticker_input = st.text_input(
+            "Ticker or code", "AAPL",
+            help="e.g. AAPL, 0700, 005930, D05. Press Enter to run — no need to click the button.",
+        ).upper().strip()
+    with cb_col3:
+        period_choice = st.selectbox("Timeframe", options=CHART_OPTIONS, index=4)  # default "6mo"
+    with cb_col4:
+        horizon_days = st.slider("Horizon (days)", 1, 30, 5)
+    run_button = st.form_submit_button("Run analysis", type="primary", use_container_width=True)
+
+_suffix = MARKET_SUFFIX_MAP[market_choice]
+if _suffix and "." not in raw_ticker_input:
+    ticker = raw_ticker_input + _suffix
+else:
+    ticker = raw_ticker_input
+
+# Streamlit reruns the whole script on ANY widget interaction anywhere in
+# the app (switching a Trade Setup slider, editing the watchlist, toggling
+# a setting) — not just when this button is clicked. Without remembering
+# the last confirmed run, those unrelated reruns would wipe the Analysis/
+# Fundamentals tabs and replace them with the "enter a ticker" placeholder,
+# even though you already ran an analysis. Snapshotting the inputs here
+# keeps the results on screen until you explicitly click Run analysis again.
+if run_button:
+    st.session_state["analysis_run"] = {
+        "ticker": ticker,
+        "period_choice": period_choice,
+        "horizon_days": horizon_days,
+    }
+
+# The single source of truth for "which instrument am I looking at". Every
+# tab reads this rather than carrying its own ticker field.
+current_ticker = (st.session_state.get("analysis_run") or {}).get("ticker", "")
+
+
 # Tab labels are plain words, no emoji. The CSS renders them as an
 # uppercase letterspaced segmented control — emoji in a navigation rail is
 # the fastest way to make a finance product look like a hobby project, and
 # the icons weren't carrying meaning the words didn't already carry.
-tab_analysis, tab_fundamentals, tab_factors, tab_tradesetup, tab_journal, tab_digest, tab_multiasset, tab_calendar, tab_watchlist, tab_news, tab_settings = st.tabs(
-    ["Analysis", "Fundamentals", "Factor Score", "Trade Setup", "Journal",
-     "Daily Digest", "Multi-Asset", "Calendar", "Watchlist", "Market News", "Settings"]
+# Ordered by kind rather than by when each was built: the three views scoped
+# to the command bar's instrument come first, then the tools you act with,
+# then reference material and settings. "Market News" is gone as a top-level
+# tab — it held a single collapsed accordion on an otherwise empty screen,
+# which is two clicks and a whole navigation slot for one list. It now sits
+# under the stock-specific news in Analysis, where market context is
+# actually being read.
+(tab_analysis, tab_fundamentals, tab_factors,
+ tab_tradesetup, tab_journal, tab_watchlist, tab_digest,
+ tab_multiasset, tab_calendar, tab_settings) = st.tabs(
+    ["Analysis", "Fundamentals", "Factor Score",
+     "Trade Setup", "Journal", "Watchlist", "Daily Digest",
+     "Multi-Asset", "Calendar", "Settings"]
 )
-
-with tab_analysis:
-    # International markets: yfinance reaches these via ticker suffixes.
-    # We auto-append the right one so you can just type the base symbol.
-    MARKET_SUFFIX_MAP = {
-        "US (default)": "",
-        "Hong Kong (HKEX)": ".HK",
-        "South Korea — KOSPI": ".KS",
-        "South Korea — KOSDAQ": ".KQ",
-        "Singapore (SGX)": ".SI",
-    }
-    CHART_OPTIONS = ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"]
-    # Maps each display option to a (yfinance period, yfinance interval) pair.
-    # 1d/5d use intraday bars WITH pre/post-market data included (prepost=True)
-    # so the chart doesn't just flatline at the last regular-session close —
-    # it reflects overnight/extended-hours trading where available.
-    CHART_PERIOD_MAP = {
-        "1d": ("1d", "5m"),
-        "5d": ("5d", "15m"),
-        "1mo": ("1mo", "1d"),
-        "3mo": ("3mo", "1d"),
-        "6mo": ("6mo", "1d"),
-        "1y": ("1y", "1d"),
-        "2y": ("2y", "1d"),
-        "5y": ("5y", "1d"),
-    }
-
-    # Command-bar style entry: type a ticker and press Enter (or click Run) —
-    # everything needed to run the analysis lives in one form, so adjusting
-    # sliders/dropdowns doesn't trigger a rerun until you're ready to go.
-    with st.form("command_bar"):
-        cb_col1, cb_col2 = st.columns([1, 2])
-        with cb_col1:
-            market_choice = st.selectbox(
-                "Market",
-                options=list(MARKET_SUFFIX_MAP.keys()),
-                help="Pick a market and just type the base ticker/code — the right suffix is added automatically. E.g. Hong Kong: '0700' becomes '0700.HK'.",
-            )
-        with cb_col2:
-            raw_ticker_input = st.text_input(
-                "Stock ticker or code (e.g. AAPL, 0700, 005930, D05)", "AAPL",
-                help="Press Enter to run — no need to click the button.",
-            ).upper().strip()
-        cb_col3, cb_col4 = st.columns(2)
-        with cb_col3:
-            period_choice = st.selectbox("Chart timeframe", options=CHART_OPTIONS, index=4)  # default "6mo"
-        with cb_col4:
-            horizon_days = st.slider("Price range horizon (trading days ahead)", 1, 30, 5)
-        run_button = st.form_submit_button("Run analysis", type="primary", use_container_width=True)
-
-    _suffix = MARKET_SUFFIX_MAP[market_choice]
-    if _suffix and "." not in raw_ticker_input:
-        ticker = raw_ticker_input + _suffix
-    else:
-        ticker = raw_ticker_input
-
-    # Streamlit reruns the whole script on ANY widget interaction anywhere in
-    # the app (switching a Trade Setup slider, editing the watchlist, toggling
-    # a setting) — not just when this button is clicked. Without remembering
-    # the last confirmed run, those unrelated reruns would wipe the Analysis/
-    # Fundamentals tabs and replace them with the "enter a ticker" placeholder,
-    # even though you already ran an analysis. Snapshotting the inputs here
-    # keeps the results on screen until you explicitly click Run analysis again.
-    if run_button:
-        st.session_state["analysis_run"] = {
-            "ticker": ticker,
-            "period_choice": period_choice,
-            "horizon_days": horizon_days,
-        }
-
-    st.divider()
-    st.markdown("#### Live price ticker")
-    live_mode = st.checkbox(
-        "Auto-refresh this ticker's price",
-        key="live_mode_toggle",
-        help="Polls Yahoo Finance on a timer instead of only refreshing when you click a button. "
-             "Still the same delayed Yahoo data as the rest of the app (not true real-time streaming) "
-             "— this just checks it more often. More frequent polling means more requests to Yahoo's "
-             "free API, which increases the chance of hitting its rate limit.",
-    )
-    live_interval = st.select_slider(
-        "Refresh every", options=[15, 30, 60], value=30, key="live_interval_slider",
-        format_func=lambda s: f"{s}s",
-    ) if live_mode else None
 
 with tab_watchlist:
     if "watchlist_text" not in st.session_state:
         st.session_state.watchlist_text = load_saved_watchlist()
 
+    # The help text has always claimed this saves automatically, but the write
+    # only ran inside the Scan handler — so editing the list and navigating
+    # away silently discarded it. An on_change callback makes the promise true.
+    def _persist_watchlist() -> None:
+        save_watchlist(st.session_state.watchlist_text)
+
     watchlist_input = st.text_area(
         "Tickers to scan (comma-separated)",
         key="watchlist_text",
+        on_change=_persist_watchlist,
         help="Edit this to any tickers you want compared. Saved automatically so it's here next time you open the app.",
     )
-    scan_button = st.button("Scan watchlist")
+    scan_button = st.button("Scan watchlist", type="primary")
     if scan_button:
         save_watchlist(st.session_state.watchlist_text)
 
@@ -4211,57 +4266,6 @@ def sector_concentration(results_df: pd.DataFrame) -> pd.DataFrame:
 
 
 
-with tab_analysis:
-    @st.fragment(run_every=live_interval)
-    def render_live_ticker():
-        if not ticker:
-            st.caption("Enter a ticker above to see a live-refreshing quote.")
-            return
-        try:
-            quote = get_live_quote(ticker)
-            if quote["price"] is None:
-                st.caption(f"No live quote available for '{ticker}' right now.")
-                return
-            delta_str = None
-            if quote["change"] is not None and quote["change_pct"] is not None:
-                delta_str = f"{quote['change']:+.2f} ({quote['change_pct']:+.2f}%)"
-            st.metric(f"{ticker}", money(quote["price"], quote["currency"]), delta=delta_str)
-            st.caption(
-                f"Market state: {quote['market_state'] or 'unknown'} · "
-                f"Last checked {datetime.now().strftime('%H:%M:%S')} · "
-                f"Still Yahoo-delayed data — 'live' means auto-refreshing, not true real-time."
-            )
-        except Exception as e:
-            if _is_rate_limit_error(e):
-                st.caption("⏳ Rate-limited right now — will retry on the next refresh.")
-            else:
-                st.caption(f"Live quote unavailable ({e}).")
-
-    render_live_ticker()
-
-
-with tab_news:
-    with st.expander("🗞️ Market news (general, not stock-specific)", expanded=False):
-        with st.spinner("Loading market headlines..."):
-            try:
-                market_news = get_news_items("SPY", max_items=6)
-            except Exception:
-                market_news = []
-
-        if not market_news:
-            st.write("Couldn't load general market news right now.")
-        else:
-            for item in market_news:
-                sentiment = tag_sentiment(item["title"] + " " + item.get("description", ""))
-                badge = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}[sentiment]
-                # Falls back to plain bold text when the feed gave us a URL
-                # that isn't an ordinary http(s) link.
-                _t = markdown_safe(item["title"])
-                st.markdown(f"{badge} **[{_t}]({item['link']})**" if item["link"] else f"{badge} **{_t}**")
-                if item["description"]:
-                    st.caption(item["description"])
-
-
 with tab_tradesetup:
     st.subheader("Trade goal planner")
     explain(
@@ -4269,151 +4273,164 @@ with tab_tradesetup:
         "actual price levels, then checks this stock's own past to report how often it historically moved "
         "that far within the window. Past frequency is not a probability for this time."
     )
-    st.warning(
-        "⚠️ You set a plain target gain and a max loss you're comfortable with, and "
-        "this shows how often THIS STOCK'S OWN PAST actually moved that much within "
-        "your chosen time window — the same real historical-percentile method as "
-        "'Historical N-day outcomes' in the Analysis tab, not a fabricated confidence "
-        "score, and not any named proprietary or university algorithm. Past frequency "
-        "is not a guarantee of future frequency — a genuinely new event (earnings, "
-        "news) can produce a move outside anything in the historical sample. This "
-        "does not tell you whether to enter a trade at all."
-    )
+    # The long-form caveat that used to sit here as a warning block is now on
+    # the result, not above the controls. Stacking a four-line explain
+    # callout and a six-line amber warning ahead of the first input pushed
+    # the actual tool below the fold and trained people to skip both.
 
-    ts_col1, ts_col2 = st.columns(2)
-    with ts_col1:
-        ts_market_choice = st.selectbox("Market", options=list(MARKET_SUFFIX_MAP.keys()), key="ts_market")
-        ts_raw_ticker = st.text_input("Stock ticker or code", "AAPL", key="ts_ticker").upper().strip()
-        _ts_suffix = MARKET_SUFFIX_MAP[ts_market_choice]
-        ts_ticker = ts_raw_ticker + _ts_suffix if (_ts_suffix and "." not in ts_raw_ticker) else ts_raw_ticker
-    with ts_col2:
-        ts_direction = st.radio("Direction", options=["Long (expecting price to rise)", "Short (expecting price to fall)"], key="ts_direction")
-        direction = "long" if ts_direction.startswith("Long") else "short"
+    # This tab follows the command bar rather than carrying its own ticker
+    # field, so you cannot analyse one stock and silently plan a trade on
+    # another.
+    if not current_ticker:
+        st.info("Enter a ticker in the command bar at the top and run an analysis to plan a trade.")
+    else:
+        ts_head, ts_dir = st.columns([1, 1])
+        with ts_head:
+            st.markdown(
+                f'<div class="tv-context">Planning for <b>{html_lib.escape(current_ticker)}</b>'
+                f'<span>change it in the command bar above</span></div>',
+                unsafe_allow_html=True,
+            )
+        ts_ticker = current_ticker
+        with ts_dir:
+            ts_direction = st.radio("Direction", options=["Long (expecting price to rise)", "Short (expecting price to fall)"], key="ts_direction")
+            direction = "long" if ts_direction.startswith("Long") else "short"
 
-    ts_col3, ts_col4, ts_col5 = st.columns(3)
-    with ts_col3:
-        target_gain_pct = st.slider(
-            "Target gain (%)", 1, 50, 10, step=1,
-            help="How much you want to make, as a plain percentage of today's price.",
-        )
-    with ts_col4:
-        max_loss_pct = st.slider(
-            "Max loss you're OK with (%)", 1, 30, 5, step=1,
-            help="How much you're willing to lose before you'd walk away, as a plain percentage of today's price.",
-        )
-    with ts_col5:
-        ts_horizon_days = st.slider(
-            "Time window (trading days)", 5, 90, 20, step=5,
-            help="How long you're giving the trade to work. Roughly 20 trading days ≈ 1 calendar month.",
-        )
+        ts_col3, ts_col4, ts_col5 = st.columns(3)
+        with ts_col3:
+            target_gain_pct = st.slider(
+                "Target gain (%)", 1, 50, 10, step=1,
+                help="How much you want to make, as a plain percentage of today's price.",
+            )
+        with ts_col4:
+            max_loss_pct = st.slider(
+                "Max loss you're OK with (%)", 1, 30, 5, step=1,
+                help="How much you're willing to lose before you'd walk away, as a plain percentage of today's price.",
+            )
+        with ts_col5:
+            ts_horizon_days = st.slider(
+                "Time window (trading days)", 5, 90, 20, step=5,
+                help="How long you're giving the trade to work. Roughly 20 trading days ≈ 1 calendar month.",
+            )
 
-    if st.button("Check this plan"):
-        try:
-            with st.spinner(f"Loading {ts_ticker} data..."):
-                ts_daily_df = load_daily_data(ts_ticker)
+        if st.button("Check this plan"):
+            try:
+                with st.spinner(f"Loading {ts_ticker} data..."):
+                    ts_daily_df = load_daily_data(ts_ticker)
 
-            plan = compute_goal_based_plan(ts_daily_df, target_gain_pct, max_loss_pct, ts_horizon_days, direction)
+                plan = compute_goal_based_plan(ts_daily_df, target_gain_pct, max_loss_pct, ts_horizon_days, direction)
 
-            if plan is None:
+                if plan is None:
+                    st.session_state.pop("ts_last_plan", None)
+                    st.error("Not enough price history for this ticker yet to check this plan.")
+                else:
+                    # Stashed in session_state (rather than only rendering right here)
+                    # so the results — and the "Log to journal" button below — survive
+                    # the rerun that clicking that button itself triggers. A button
+                    # nested inside `if st.button(...):` loses its click on that rerun,
+                    # since the outer button's True state doesn't persist across reruns.
+                    st.session_state["ts_last_plan"] = {
+                        "plan": plan,
+                        "ticker": ts_ticker,
+                        "direction": direction,
+                        "direction_label": ts_direction,
+                        "currency": get_fundamentals(ts_ticker).get("currency", "USD"),
+                        "target_gain_pct": target_gain_pct,
+                        "max_loss_pct": max_loss_pct,
+                        "horizon_days": ts_horizon_days,
+                    }
+            except Exception as e:
                 st.session_state.pop("ts_last_plan", None)
-                st.error("Not enough price history for this ticker yet to check this plan.")
+                if _is_rate_limit_error(e):
+                    st.error("⏳ Yahoo Finance is rate-limiting requests right now — try again in a minute.")
+                else:
+                    st.error(f"Something went wrong: {e}")
+
+        _saved_plan = st.session_state.get("ts_last_plan")
+        if _saved_plan:
+            plan = _saved_plan["plan"]
+            p_ticker = _saved_plan["ticker"]
+            p_direction = _saved_plan["direction"]
+            p_currency = _saved_plan["currency"]
+            p_target_pct = _saved_plan["target_gain_pct"]
+            p_loss_pct = _saved_plan["max_loss_pct"]
+            p_horizon = _saved_plan["horizon_days"]
+
+            st.markdown(f"### {p_ticker} — {_saved_plan['direction_label']}")
+            pcol1, pcol2, pcol3 = st.columns(3)
+            pcol1.metric("Current price", money(plan["last_price"], p_currency))
+            pcol2.metric("Your target", money(plan["target_price"], p_currency),
+                         delta=f"{'+' if p_direction == 'long' else '-'}{p_target_pct}%", delta_color="off")
+            pcol3.metric("Your max-loss level", money(plan["stop_price"], p_currency),
+                         delta=f"{'-' if p_direction == 'long' else '+'}{p_loss_pct}%", delta_color="off")
+
+            rcol1, rcol2 = st.columns(2)
+            rcol1.metric(f"Hit target within {p_horizon} days (past year)", f"{plan['hit_target_pct']:.0f}% of the time")
+            rcol2.metric(f"Hit max-loss within {p_horizon} days (past year)", f"{plan['hit_stop_pct']:.0f}% of the time")
+
+            # The caveat belongs here, attached to the two percentages someone
+            # might actually act on — not stacked above the controls where it
+            # was read as boilerplate and skipped along with everything else.
+            st.warning(
+                "These two percentages are how often this stock's own past year actually "
+                "moved that far within the window — real historical frequency, not a "
+                "confidence score and not a probability for this trade. A new event "
+                "(earnings, news) can move it outside anything in that sample. This does "
+                "not tell you whether to take the trade."
+            )
+
+            st.caption(
+                f"Based on {plan['sample_size']} overlapping {p_horizon}-day windows from this stock's own "
+                f"past ~year of daily prices. Each % is simply how often the price was at or beyond that level "
+                f"exactly {p_horizon} trading days later — not 'at any point during' the window, and not "
+                "a forecast. A small sample size makes these percentages noisier — treat a handful of windows "
+                "as a rough signal, not a precise number."
+            )
+            st.info(
+                "Remember: a low hit-rate on your target doesn't mean 'don't do it', and a high one doesn't mean "
+                "'guaranteed' — it's just how often this specific move size has happened for this stock before, "
+                "given no particular reason to expect it works the same way going forward."
+            )
+
+            st.divider()
+            st.subheader("Position sizing (optional)")
+            st.caption(
+                "Standard retail risk-management math: given your account size and how much of it you're "
+                "willing to risk on this ONE trade, this suggests a share count so a full stop-out costs "
+                "roughly that much — not a recommendation on whether to take the trade, and not adjusted "
+                "for any other positions you already hold."
+            )
+            poscol1, poscol2 = st.columns(2)
+            with poscol1:
+                account_size = st.number_input(
+                    "Account size", min_value=0.0, value=10000.0, step=500.0, key="ts_account_size",
+                )
+            with poscol2:
+                risk_pct_of_account = st.slider(
+                    "% of account to risk on this trade", 0.5, 10.0, 1.0, step=0.5, key="ts_risk_pct",
+                    help="A commonly cited retail guideline is around 1-2% per trade, so a string of losses "
+                         "doesn't wipe out the account — a guideline, not a rule; your own risk tolerance may differ.",
+                )
+            per_share_risk = abs(plan["last_price"] - plan["stop_price"])
+            if account_size > 0 and per_share_risk > 0:
+                dollars_at_risk = account_size * risk_pct_of_account / 100
+                suggested_shares = int(dollars_at_risk / per_share_risk)
+                poscol_a, poscol_b, poscol_c = st.columns(3)
+                poscol_a.metric("$ at risk if stopped out", money(dollars_at_risk, p_currency))
+                poscol_b.metric("Suggested share count", f"{suggested_shares:,}")
+                poscol_c.metric("Position value at current price", money(suggested_shares * plan["last_price"], p_currency))
             else:
-                # Stashed in session_state (rather than only rendering right here)
-                # so the results — and the "Log to journal" button below — survive
-                # the rerun that clicking that button itself triggers. A button
-                # nested inside `if st.button(...):` loses its click on that rerun,
-                # since the outer button's True state doesn't persist across reruns.
-                st.session_state["ts_last_plan"] = {
-                    "plan": plan,
-                    "ticker": ts_ticker,
-                    "direction": direction,
-                    "direction_label": ts_direction,
-                    "currency": get_fundamentals(ts_ticker).get("currency", "USD"),
-                    "target_gain_pct": target_gain_pct,
-                    "max_loss_pct": max_loss_pct,
-                    "horizon_days": ts_horizon_days,
+                st.caption("Enter an account size above to see a suggested position size.")
+
+            if st.button("📓 Log this setup to Trade Journal"):
+                st.session_state["journal_prefill"] = {
+                    "ticker": p_ticker,
+                    "direction": p_direction,
+                    "entry_price": round(plan["last_price"], 4),
+                    "stop_loss": round(plan["stop_price"], 4),
+                    "take_profit": round(plan["target_price"], 4),
                 }
-        except Exception as e:
-            st.session_state.pop("ts_last_plan", None)
-            if _is_rate_limit_error(e):
-                st.error("⏳ Yahoo Finance is rate-limiting requests right now — try again in a minute.")
-            else:
-                st.error(f"Something went wrong: {e}")
-
-    _saved_plan = st.session_state.get("ts_last_plan")
-    if _saved_plan:
-        plan = _saved_plan["plan"]
-        p_ticker = _saved_plan["ticker"]
-        p_direction = _saved_plan["direction"]
-        p_currency = _saved_plan["currency"]
-        p_target_pct = _saved_plan["target_gain_pct"]
-        p_loss_pct = _saved_plan["max_loss_pct"]
-        p_horizon = _saved_plan["horizon_days"]
-
-        st.markdown(f"### {p_ticker} — {_saved_plan['direction_label']}")
-        pcol1, pcol2, pcol3 = st.columns(3)
-        pcol1.metric("Current price", money(plan["last_price"], p_currency))
-        pcol2.metric("Your target", money(plan["target_price"], p_currency),
-                     delta=f"{'+' if p_direction == 'long' else '-'}{p_target_pct}%", delta_color="off")
-        pcol3.metric("Your max-loss level", money(plan["stop_price"], p_currency),
-                     delta=f"{'-' if p_direction == 'long' else '+'}{p_loss_pct}%", delta_color="off")
-
-        rcol1, rcol2 = st.columns(2)
-        rcol1.metric(f"Hit target within {p_horizon} days (past year)", f"{plan['hit_target_pct']:.0f}% of the time")
-        rcol2.metric(f"Hit max-loss within {p_horizon} days (past year)", f"{plan['hit_stop_pct']:.0f}% of the time")
-
-        st.caption(
-            f"Based on {plan['sample_size']} overlapping {p_horizon}-day windows from this stock's own "
-            f"past ~year of daily prices. Each % is simply how often the price was at or beyond that level "
-            f"exactly {p_horizon} trading days later — not 'at any point during' the window, and not "
-            "a forecast. A small sample size makes these percentages noisier — treat a handful of windows "
-            "as a rough signal, not a precise number."
-        )
-        st.info(
-            "Remember: a low hit-rate on your target doesn't mean 'don't do it', and a high one doesn't mean "
-            "'guaranteed' — it's just how often this specific move size has happened for this stock before, "
-            "given no particular reason to expect it works the same way going forward."
-        )
-
-        st.divider()
-        st.subheader("Position sizing (optional)")
-        st.caption(
-            "Standard retail risk-management math: given your account size and how much of it you're "
-            "willing to risk on this ONE trade, this suggests a share count so a full stop-out costs "
-            "roughly that much — not a recommendation on whether to take the trade, and not adjusted "
-            "for any other positions you already hold."
-        )
-        poscol1, poscol2 = st.columns(2)
-        with poscol1:
-            account_size = st.number_input(
-                "Account size", min_value=0.0, value=10000.0, step=500.0, key="ts_account_size",
-            )
-        with poscol2:
-            risk_pct_of_account = st.slider(
-                "% of account to risk on this trade", 0.5, 10.0, 1.0, step=0.5, key="ts_risk_pct",
-                help="A commonly cited retail guideline is around 1-2% per trade, so a string of losses "
-                     "doesn't wipe out the account — a guideline, not a rule; your own risk tolerance may differ.",
-            )
-        per_share_risk = abs(plan["last_price"] - plan["stop_price"])
-        if account_size > 0 and per_share_risk > 0:
-            dollars_at_risk = account_size * risk_pct_of_account / 100
-            suggested_shares = int(dollars_at_risk / per_share_risk)
-            poscol_a, poscol_b, poscol_c = st.columns(3)
-            poscol_a.metric("$ at risk if stopped out", money(dollars_at_risk, p_currency))
-            poscol_b.metric("Suggested share count", f"{suggested_shares:,}")
-            poscol_c.metric("Position value at current price", money(suggested_shares * plan["last_price"], p_currency))
-        else:
-            st.caption("Enter an account size above to see a suggested position size.")
-
-        if st.button("📓 Log this setup to Trade Journal"):
-            st.session_state["journal_prefill"] = {
-                "ticker": p_ticker,
-                "direction": p_direction,
-                "entry_price": round(plan["last_price"], 4),
-                "stop_loss": round(plan["stop_price"], 4),
-                "take_profit": round(plan["target_price"], 4),
-            }
-            st.success("Staged — open the 📓 Trade Journal tab to finish adding it (shares, date, notes).")
+                st.success("Staged — open the 📓 Trade Journal tab to finish adding it (shares, date, notes).")
 
 
 with tab_journal:
@@ -4432,7 +4449,11 @@ with tab_journal:
         with st.form("add_journal_entry"):
             jcol1, jcol2 = st.columns(2)
             with jcol1:
-                j_ticker = st.text_input("Ticker", value=prefill.get("ticker", "")).upper().strip()
+                # Defaults to whatever the command bar has loaded, so logging the
+                # trade you just analysed doesn't mean retyping its symbol.
+                j_ticker = st.text_input(
+                    "Ticker", value=prefill.get("ticker", current_ticker or "")
+                ).upper().strip()
                 j_direction = st.radio("Direction", options=["long", "short"],
                                        index=0 if prefill.get("direction", "long") == "long" else 1,
                                        horizontal=True)
@@ -5095,7 +5116,7 @@ if _analysis_run:
 
 
         with tab_fundamentals:
-            st.caption("Fundamentals, analyst estimates, earnings, and risk metrics for the ticker selected in the Analysis tab.")
+            st.caption("Fundamentals, analyst estimates, earnings and risk metrics for the instrument loaded in the command bar.")
 
             # --- Fundamentals + Analyst view + Earnings/Dividends + Risk profile ---
             # fundamentals already fetched above for the quote strip (cached — no extra request here)
@@ -5485,11 +5506,11 @@ else:
     # st.write() outside any tab — which rendered below the tab strip and
     # showed up regardless of which tab was open.
     with tab_analysis:
-        st.info("Enter a ticker in the command bar above and select **Run analysis** to begin.")
+        st.info("Enter a ticker in the command bar at the top of the page and select **Run analysis** to begin.")
     with tab_fundamentals:
-        st.info("Enter a ticker in the command bar above and select **Run analysis** to begin.")
+        st.info("Enter a ticker in the command bar at the top of the page and select **Run analysis** to begin.")
     with tab_factors:
-        st.info("Enter a ticker in the command bar above and select **Run analysis** to begin.")
+        st.info("Enter a ticker in the command bar at the top of the page and select **Run analysis** to begin.")
 
 
 with tab_watchlist:
@@ -5600,6 +5621,87 @@ with tab_watchlist:
         st.info("Edit the watchlist above and select **Scan watchlist** to compare tickers.")
 
 
+with tab_analysis:
+    # AUTO-REFRESH — strictly opt-in.
+    #
+    # This block used to render unconditionally, with the checkbox only
+    # controlling the polling interval. So a user who had never asked for a
+    # live quote still got a "Live price ticker" panel wedged between the
+    # command bar and their results, and when the fetch failed it printed the
+    # raw exception — libcurl error text, to an audience that came for a
+    # stock chart. Now the panel exists only once you switch it on, and it
+    # sits with the price data rather than interrupting the path to it.
+    st.divider()
+    live_mode = st.checkbox(
+        "Auto-refresh this price",
+        key="live_mode_toggle",
+        help="Polls Yahoo on a timer instead of only refreshing when you click a button. Still the "
+             "same delayed Yahoo data as the rest of the app, just checked more often. More frequent "
+             "polling means more requests, which increases the chance of hitting Yahoo's rate limit.",
+    )
+    live_interval = st.select_slider(
+        "Refresh every", options=[15, 30, 60], value=30, key="live_interval_slider",
+        format_func=lambda s: f"{s}s",
+    ) if live_mode else None
+
+    if live_mode:
+        @st.fragment(run_every=live_interval)
+        def render_live_ticker():
+            if not current_ticker:
+                st.caption("Run an analysis first — auto-refresh follows the loaded instrument.")
+                return
+            try:
+                quote = get_live_quote(current_ticker)
+                if quote["price"] is None:
+                    st.caption(f"No live quote available for '{current_ticker}' right now.")
+                    return
+                delta_str = None
+                if quote["change"] is not None and quote["change_pct"] is not None:
+                    delta_str = f"{quote['change']:+.2f} ({quote['change_pct']:+.2f}%)"
+                st.metric(current_ticker, money(quote["price"], quote["currency"]), delta=delta_str)
+                st.caption(
+                    f"Market state: {quote['market_state'] or 'unknown'} · "
+                    f"Last checked {datetime.now().strftime('%H:%M:%S')} · "
+                    "Still Yahoo-delayed data — 'live' means auto-refreshing, not true real-time."
+                )
+            except Exception as exc:
+                # Never surface the raw exception. It is libcurl/urllib internals
+                # and tells the reader nothing they can act on.
+                if _is_rate_limit_error(exc):
+                    st.caption("Rate-limited by Yahoo — will try again on the next refresh.")
+                else:
+                    st.caption(
+                        f"Couldn't refresh just now — trying again in {live_interval}s. "
+                        "The figures above are from the last successful load."
+                    )
+
+        render_live_ticker()
+
+
+# General market headlines, folded in beneath the ticker-specific news
+# above rather than occupying a top-level tab of their own.
+with tab_analysis:
+    with st.expander("Wider market news (not specific to this ticker)", expanded=False):
+        with st.spinner("Loading market headlines..."):
+            try:
+                market_news = get_news_items("SPY", max_items=6)
+            except Exception:
+                market_news = []
+
+        if not market_news:
+            st.write("Couldn't load general market news right now.")
+        else:
+            for item in market_news:
+                sentiment = tag_sentiment(item["title"] + " " + item.get("description", ""))
+                badge = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}[sentiment]
+                # Falls back to plain bold text when the feed gave us a URL
+                # that isn't an ordinary http(s) link.
+                _t = markdown_safe(item["title"])
+                st.markdown(f"{badge} **[{_t}]({item['link']})**" if item["link"] else f"{badge} **{_t}**")
+                if item["description"]:
+                    st.caption(item["description"])
+
+
 # ----------------------------------------------------------------------
 # FOOTER — copyright year computed at render time so it never goes stale,
 # plus the core disclaimer repeated once more at the very bottom of the
@@ -5630,13 +5732,15 @@ st.markdown(
 # where a permanently pinned bar would eat scarce vertical space and sit
 # on top of the content it's meant to annotate.
 # ----------------------------------------------------------------------
-_status_ticker = st.session_state.get("last_ticker") or "—"
+# "LOADED —" reads like a value that failed to render rather than an empty
+# state, so the null case says so in words.
+_status_ticker = st.session_state.get("last_ticker") or ""
 st.markdown(
     f"""
 <div class="tv-statusbar">
   <span class="tv-sb-item"><span class="tv-sb-dot"></span>Yahoo Finance · delayed</span>
   <span class="tv-sb-sep"></span>
-  <span class="tv-sb-item">Loaded <b>{html_lib.escape(str(_status_ticker))}</b></span>
+  <span class="tv-sb-item">{f"Loaded <b>{html_lib.escape(_status_ticker)}</b>" if _status_ticker else "No instrument loaded"}</span>
   <span class="tv-sb-sep"></span>
   <span class="tv-sb-item">Explain {'ON' if st.session_state.get('explain_mode', True) else 'OFF'}</span>
   <span class="tv-sb-spacer"></span>
