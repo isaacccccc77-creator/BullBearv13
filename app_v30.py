@@ -10,14 +10,12 @@ financial advice.
 """
 
 import re
-import os
-import json
-import hashlib
 import time
 import io
 import secrets
 from contextlib import contextmanager
 import bcrypt
+import storage
 import pyotp
 import qrcode
 import html as html_lib
@@ -62,23 +60,12 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 # if this becomes annoying, just kept out for now to keep this version
 # simple and reliable.
 # ----------------------------------------------------------------------
-USERS_FILE = "bullbear_users.json"
-
-# Everything this app persists lives in one directory beside the code. Two
-# reasons it's a named constant rather than a bare relative filename: it
-# keeps user data out of whatever working directory Streamlit happens to be
-# launched from, and it gives the path helpers below a single root to
-# confine writes to.
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_data")
-
-# Usernames are allowed letters, digits, underscore, hyphen and dot, 3-32
-# characters, and may not start with a dot. This is not cosmetic: usernames
-# are interpolated into per-user filenames (watchlist, journal, Telegram
-# credentials, digest snapshot), so without a whitelist a name like
-# "../../etc/cron.d/x" would direct a write outside the data directory.
-# Whitelisting the allowed characters is the reliable direction here —
-# blacklisting "../" misses encoded, absolute and Windows-style variants.
-USERNAME_PATTERN = re.compile(r"^(?!\.)[A-Za-z0-9._-]{3,32}$")
+# Persistence lives in storage.py, which picks its backend from
+# DATABASE_URL: Postgres when one is configured, JSON files under user_data/
+# otherwise. Keeping it in a separate module means it imports no Streamlit and
+# can be tested directly. Username validation and path confinement moved there
+# too, so there is exactly one implementation of each rather than a copy here
+# that can drift.
 
 # Per-account throttle on failed sign-ins. Held in memory, so it resets when
 # the server restarts — but the point is to make online password guessing
@@ -88,61 +75,40 @@ MAX_LOGIN_ATTEMPTS = 5
 LOGIN_LOCKOUT_SECONDS = 300
 
 
-def _ensure_data_dir() -> None:
-    """Creates the data directory, readable only by the account running the app."""
-    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
-
-
 def is_valid_username(name: str) -> bool:
-    return bool(USERNAME_PATTERN.match(name or ""))
+    """Letters, digits, dot, underscore, hyphen; 3-32 chars; no leading dot.
 
-
-def user_data_path(filename: str) -> str:
+    Not cosmetic: the JSON backend interpolates usernames into filenames, so
+    without a whitelist a name like "../../etc/cron.d/x" would direct a write
+    outside the data directory. Defined once in storage.py and delegated to
+    here so the two can never drift apart.
     """
-    Resolves a filename inside DATA_DIR and refuses anything that escapes it.
+    return bool(storage.USERNAME_PATTERN.match(name or ""))
 
-    Callers already pass validated usernames, so this is the second of two
-    independent checks rather than the only one. That redundancy is
-    deliberate: the validation regex guards new accounts, and this guards
-    every write regardless of where the name came from — including accounts
-    created before the regex existed.
+
+@st.cache_resource(show_spinner=False)
+def get_store():
     """
-    _ensure_data_dir()
-    resolved = os.path.realpath(os.path.join(DATA_DIR, filename))
-    if os.path.commonpath([resolved, os.path.realpath(DATA_DIR)]) != os.path.realpath(DATA_DIR):
-        raise ValueError("Refusing to access a path outside the data directory.")
-    return resolved
+    The persistence backend, opened once per server process.
 
-
-def write_private_json(path: str, payload) -> None:
+    Cached because Streamlit re-executes this script on every interaction —
+    building a fresh Postgres connection pool per click would exhaust a
+    free-tier connection limit within seconds. See storage.py for how the
+    backend is chosen.
     """
-    Writes JSON that only the owning OS account can read.
-
-    The mode is applied before any content is written — creating the file
-    world-readable and chmod-ing afterwards leaves a window where another
-    local user can read it. That matters most for the Telegram bot token and
-    the TOTP secrets, which are live credentials sitting on disk.
-    """
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(payload, f, indent=2)
-
-
-def load_users() -> dict:
-    # Accounts used to live beside the app rather than in DATA_DIR. If that
-    # older file is present and the new one is not, adopt it, so upgrading
-    # doesn't silently orphan everyone's existing account.
-    for path in (user_data_path(USERS_FILE), USERS_FILE):
+    store = storage.get_storage()
+    # First run against a fresh database: lift anything sitting in local JSON
+    # into Postgres so an existing deployment's accounts survive the move.
+    # Idempotent — accounts already present are skipped.
+    if isinstance(store, storage.PostgresStorage):
         try:
-            with open(path, "r") as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError, ValueError, OSError):
-            continue
-    return {}
-
-
-def save_users(users: dict) -> None:
-    write_private_json(user_data_path(USERS_FILE), users)
+            summary = storage.migrate_json_to_postgres(store)
+            if summary["users"]:
+                print(f"[tickveil] migrated {summary['users']} account(s) "
+                      f"and {summary['documents']} document(s) into Postgres")
+        except Exception as exc:
+            print(f"[tickveil] JSON->Postgres migration skipped: {exc}")
+    return store
 
 
 def hash_password(password: str) -> str:
@@ -151,7 +117,7 @@ def hash_password(password: str) -> str:
 
 def check_password(password: str, hashed: str) -> bool:
     try:
-        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+        return bcrypt.checkpw(password.encode("utf-8"), (hashed or "").encode("utf-8"))
     except Exception:
         return False
 
@@ -1762,7 +1728,7 @@ def send_telegram_message(bot_token: str, chat_id: str, message: str) -> tuple[b
         return False, str(e)
 
 
-users = load_users()
+store = get_store()
 
 # Only show the login/register screen if not already authenticated —
 # avoids flashing it after a successful login on rerun.
@@ -1807,7 +1773,7 @@ if not st.session_state.get("authenticated"):
                         f"Try again in {waiting // 60}m {waiting % 60}s."
                     )
                 else:
-                    user_record = users.get(login_username)
+                    user_record = store.get_user(login_username) if is_valid_username(login_username) else None
                     # bcrypt is run even when the username is unknown, against a
                     # throwaway hash. Returning instantly for a bad username and
                     # slowly for a good one leaks which accounts exist, and that
@@ -1850,21 +1816,25 @@ if not st.session_state.get("authenticated"):
                         "Usernames can use letters, numbers, dot, underscore and hyphen, "
                         "must be 3–32 characters, and can't start with a dot."
                     )
-                elif reg_username in users:
+                elif store.user_exists(reg_username):
                     st.error("That username is already taken.")
                 elif reg_password != reg_password_confirm:
                     st.error("Passwords don't match.")
                 elif _pw_problem:
                     st.error(_pw_problem)
                 else:
-                    users[reg_username] = {
+                    created = store.create_user(reg_username, {
                         "name": reg_name,
                         "password_hash": hash_password(reg_password),
                         "totp_enabled": False,
                         "totp_secret": None,
-                    }
-                    save_users(users)
-                    st.success("Account created — head to the 'Sign in' tab.")
+                    })
+                    # create_user is atomic, so it also catches the race where
+                    # two people claim the same name at the same moment.
+                    if created:
+                        st.success("Account created — head to the 'Sign in' tab.")
+                    else:
+                        st.error("That username was just taken — try another.")
 
         st.markdown(
             '<div style="text-align:center;margin-top:1.6rem;font-family:Inter,sans-serif;'
@@ -1877,17 +1847,14 @@ if not st.session_state.get("authenticated"):
 
 # --- Password auth succeeded. Now handle optional 2FA. ---
 username = st.session_state["username"]
-user_record = users[username]
+user_record = store.get_user(username)
+if user_record is None:
+    # The account vanished under an authenticated session (deleted, or the
+    # storage backend was switched). Drop the session rather than crashing.
+    for _k in ["authenticated", "username", "name"]:
+        st.session_state.pop(_k, None)
+    st.rerun()
 totp_enabled = user_record.get("totp_enabled", False)
-
-# Every per-user filename is built from this, never from `username` directly.
-# Accounts created before username validation existed may hold characters
-# that are unsafe in a path, so anything outside the whitelist collapses to
-# an underscore here. The digest suffix keeps two different original names
-# from colliding on the same sanitised string (e.g. "a/b" and "a:b").
-safe_username = re.sub(r"[^A-Za-z0-9._-]", "_", username)[:32].lstrip(".") or "user"
-if safe_username != username:
-    safe_username = f"{safe_username}_{hashlib.sha256(username.encode()).hexdigest()[:8]}"
 
 if totp_enabled and not st.session_state.get(f"totp_verified_{username}", False):
     st.markdown(
@@ -2140,81 +2107,66 @@ with st.expander("New to these terms? A short glossary"):
 # above, where it costs no layout and needs no drawer to reach.
 
 # ----------------------------------------------------------------------
-# WATCHLIST PERSISTENCE — saves your watchlist to a small local file, one
-# per user account, so it's still there next time you log in. Lives next
-# to the app itself; nothing is sent anywhere.
+# PER-USER DOCUMENTS — watchlist, Telegram credentials, trade journal and
+# the digest snapshot.
+#
+# All four go through the storage backend rather than touching the
+# filesystem directly, so the same code path works whether this is running
+# locally against JSON files or in production against Postgres. Each is a
+# JSON blob owned by one account; the database treats them as opaque, so
+# changing what a journal entry contains needs no schema migration.
+#
+# Writes are best-effort: a failed save costs the user that one change, and
+# is never worth taking the whole page down for.
 # ----------------------------------------------------------------------
-WATCHLIST_FILE = user_data_path(f"bullbear_watchlist_{safe_username}.json")
 DEFAULT_WATCHLIST = "AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA, JPM, XOM, JNJ"
 
 
 def load_saved_watchlist() -> str:
-    try:
-        with open(WATCHLIST_FILE, "r") as f:
-            return json.load(f).get("watchlist", DEFAULT_WATCHLIST)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return DEFAULT_WATCHLIST
+    doc = store.get_doc(username, "watchlist", None) or {}
+    return doc.get("watchlist", DEFAULT_WATCHLIST)
 
 
 def save_watchlist(watchlist_text: str) -> None:
     try:
-        write_private_json(WATCHLIST_FILE, {"watchlist": watchlist_text})
-    except OSError:
-        pass  # non-critical — worst case, it just doesn't persist this time
-
-
-TELEGRAM_FILE = user_data_path(f"bullbear_telegram_{safe_username}.json")
+        store.put_doc(username, "watchlist", {"watchlist": watchlist_text})
+    except Exception:
+        pass
 
 
 def load_saved_telegram() -> dict:
-    try:
-        with open(TELEGRAM_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"bot_token": "", "chat_id": ""}
+    return store.get_doc(username, "telegram", None) or {"bot_token": "", "chat_id": ""}
 
 
 def save_telegram(bot_token: str, chat_id: str) -> None:
     try:
-        write_private_json(TELEGRAM_FILE, {"bot_token": bot_token, "chat_id": chat_id})
-    except OSError:
-        pass  # non-critical — worst case, it just doesn't persist this time
-
-
-JOURNAL_FILE = user_data_path(f"bullbear_journal_{safe_username}.json")
+        store.put_doc(username, "telegram", {"bot_token": bot_token, "chat_id": chat_id})
+    except Exception:
+        pass
 
 
 def load_journal() -> list[dict]:
-    try:
-        with open(JOURNAL_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+    return store.get_doc(username, "journal", None) or []
 
 
 def save_journal(entries: list[dict]) -> None:
     try:
-        write_private_json(JOURNAL_FILE, entries)
-    except OSError:
-        pass  # non-critical — worst case, it just doesn't persist this time
-
-
-DIGEST_SNAPSHOT_FILE = user_data_path(f"bullbear_digest_snapshot_{safe_username}.json")
+        store.put_doc(username, "journal", entries)
+    except Exception:
+        pass
 
 
 def load_digest_snapshot() -> dict:
-    try:
-        with open(DIGEST_SNAPSHOT_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    return store.get_doc(username, "digest_snapshot", None) or {}
 
 
 def save_digest_snapshot(snapshot: dict) -> None:
     try:
-        write_private_json(DIGEST_SNAPSHOT_FILE, snapshot)
-    except OSError:
-        pass  # non-critical — worst case, it just doesn't persist this time
+        store.put_doc(username, "digest_snapshot", snapshot)
+    except Exception:
+        pass
+
+
 
 
 # ----------------------------------------------------------------------
@@ -2423,7 +2375,7 @@ with tab_settings:
             st.error(_new_pw_problem)
         else:
             user_record["password_hash"] = hash_password(new_pw)
-            save_users(users)
+            store.update_user(username, user_record)
             st.success("Password updated.")
 
     st.divider()
@@ -2433,7 +2385,7 @@ with tab_settings:
         if st.button("Disable 2FA"):
             user_record["totp_enabled"] = False
             user_record["totp_secret"] = None
-            save_users(users)
+            store.update_user(username, user_record)
             st.rerun()
     else:
         st.write("2FA is off. Recommended for extra security — free, uses an app like Google Authenticator.")
@@ -2457,7 +2409,7 @@ with tab_settings:
                 if pyotp.TOTP(secret).verify(confirm_code):
                     user_record["totp_enabled"] = True
                     user_record["totp_secret"] = secret
-                    save_users(users)
+                    store.update_user(username, user_record)
                     del st.session_state["setting_up_2fa"]
                     del st.session_state["pending_totp_secret"]
                     st.success("2FA enabled!")

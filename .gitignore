@@ -9,6 +9,10 @@ bullbear_telegram_*.json
 bullbear_journal_*.json
 bullbear_digest_snapshot_*.json
 
+# Test scratch
+.test_data/
+pgdata/
+
 # Python
 __pycache__/
 *.py[cod]

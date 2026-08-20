@@ -9,3 +9,9 @@ requests
 bcrypt
 pyotp
 qrcode[pil]
+
+# Postgres backend. Only needed when DATABASE_URL is set — without it the app
+# falls back to JSON files and these go unused. Required for any deployment
+# that takes payment, since a container filesystem does not survive a redeploy.
+psycopg[binary]
+psycopg-pool

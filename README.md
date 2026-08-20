@@ -20,17 +20,50 @@ streamlit run app_v30.py
 Create an account on first launch. Passwords are hashed with bcrypt; TOTP
 two-factor (Google Authenticator, Authy) is optional and set up under Settings.
 
-Accounts and per-user data are written to `user_data/`, created `0700`, with
-each file written `0600`. That is reliable when running locally. On Streamlit
-Community Cloud's free tier, local files are not guaranteed to survive a
-redeploy — for a long-lived public deployment, move this to a hosted database.
-
 Run the checks with:
 
 ```bash
 python test_security.py
 python test_ordering.py
+python test_storage.py                      # JSON backend
+TEST_DATABASE_URL=postgresql://... python test_storage.py   # both backends
 ```
+
+## Storage
+
+`storage.py` picks its backend from one environment variable:
+
+| `DATABASE_URL` | Backend | Use for |
+| --- | --- | --- |
+| unset | JSON files under `user_data/` | Local development. Zero setup. |
+| set | Postgres | Anything real. |
+
+The app cannot tell the two apart — `test_storage.py` runs the same assertions
+against both, because a behaviour that holds for files but not for Postgres is
+a bug that would only surface in production.
+
+**Use Postgres for any deployment that takes payment.** A container filesystem
+does not survive a redeploy; Streamlit Community Cloud makes no guarantee about
+`user_data/`. Losing a subscriber's trade journal is not a recoverable mistake.
+Supabase and Neon both have free tiers well beyond what this needs. Set:
+
+```bash
+export DATABASE_URL='postgresql://user:pass@host:5432/dbname'
+```
+
+On first start against an empty database the app lifts any existing local JSON
+accounts and documents into Postgres automatically, then leaves them alone.
+The migration is idempotent — accounts already in the database are skipped, so
+it never clobbers newer data with a stale file.
+
+Schema: `users` (one row per account, including the `plan`, `plan_expires` and
+`stripe_customer_id` columns the subscription work will read) and
+`user_documents` (one JSONB blob per account per kind — watchlist, journal,
+Telegram credentials, digest snapshot). Documents are opaque to the database,
+so changing what a journal entry contains needs no schema migration.
+
+Under the JSON backend the data directory is created `0700` and every file
+written `0600`, with the mode set at creation rather than chmod-ed afterwards.
 
 ## Files
 
@@ -40,6 +73,8 @@ python test_ordering.py
 | `app_v22.py` | Earlier version, kept for reference. |
 | `test_security.py` | Input-handling boundaries: username→path, link schemes, password policy. |
 | `test_ordering.py` | Guards the call-before-definition bug class described below. |
+| `test_storage.py` | Same contract asserted against both storage backends, plus the migration. |
+| `storage.py` | Persistence. JSON files or Postgres, chosen by `DATABASE_URL`. |
 | `.streamlit/config.toml` | Base theme (dark, champagne primary). |
 | `requirements.txt` | Dependencies. |
 

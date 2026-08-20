@@ -24,16 +24,21 @@ SOURCE = open(APP, encoding="utf-8").read()
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".test_data")
 
+# Username validation and path confinement live in storage.py, which imports
+# no Streamlit and so can be imported outright.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import storage  # noqa: E402
+
 
 def load_functions(names):
-    """Pulls named top-level functions out of the app and compiles them."""
-    namespace = {
-        "re": re,
-        "os": os,
-        "DATA_DIR": TEST_DATA_DIR,
-        "_ensure_data_dir": lambda: os.makedirs(TEST_DATA_DIR, mode=0o700, exist_ok=True),
-        "USERNAME_PATTERN": re.compile(r"^(?!\.)[A-Za-z0-9._-]{3,32}$"),
-    }
+    """Pulls named top-level functions out of the app and compiles them.
+
+    The app is a single Streamlit script that renders a page on import, so
+    importing it here would try to boot a whole app. Extracting the functions
+    keeps the tests honest — they run the real shipped code, not a copy —
+    without needing a running server.
+    """
+    namespace = {"re": re, "os": os}
     for name in names:
         start = SOURCE.index(f"def {name}(")
         end = SOURCE.index("\n\ndef ", start)
@@ -41,10 +46,12 @@ def load_functions(names):
     return namespace
 
 
-fn = load_functions([
-    "is_valid_username", "user_data_path", "password_problem",
-    "safe_link", "markdown_safe",
-])
+fn = load_functions(["password_problem", "safe_link", "markdown_safe"])
+
+# Backed by the real storage module rather than a re-implementation.
+store = storage.JSONStorage(TEST_DATA_DIR)
+fn["is_valid_username"] = lambda n: bool(storage.USERNAME_PATTERN.match(n or ""))
+fn["user_data_path"] = store._path
 
 failures = []
 
@@ -60,7 +67,7 @@ def expect(label, actual, wanted):
 def expect_raises(label, call):
     try:
         call()
-    except ValueError:
+    except (ValueError, storage.StorageError):
         print(f"  ok   {label}")
         return
     print(f" FAIL  {label} — no error raised")
@@ -84,6 +91,14 @@ expect(
 )
 for escape in ["../escape.json", "../../etc/cron.d/payload", "sub/../../out.json"]:
     expect_raises(f"refuses {escape!r}", lambda e=escape: fn["user_data_path"](e))
+
+print("\nDocument-kind whitelist — a caller cannot invent a key that would")
+print("become an arbitrary filename.")
+for bad_kind in ["../../etc/passwd", "arbitrary", ""]:
+    expect_raises(f"refuses kind {bad_kind!r}",
+                  lambda k=bad_kind: store.get_doc("judge", k))
+for good_kind in sorted(storage.DOC_KINDS):
+    expect(f"accepts kind {good_kind!r}", store.get_doc("judge", good_kind, "fallback"), "fallback")
 
 print("\nLink schemes — headline URLs come from an upstream feed and are")
 print("rendered as markdown links, so anything but http(s) is refused.")
