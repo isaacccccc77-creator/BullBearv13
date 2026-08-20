@@ -1,0 +1,20 @@
+# Account records and per-user data. bullbear_users.json holds password
+# hashes and TOTP secrets; the per-user files hold Telegram bot tokens.
+# None of it belongs in version control — a hash pushed to a public repo is
+# an offline cracking target that no later commit can take back.
+user_data/
+bullbear_users.json
+bullbear_watchlist_*.json
+bullbear_telegram_*.json
+bullbear_journal_*.json
+bullbear_digest_snapshot_*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# OS
+.DS_Store

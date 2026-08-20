@@ -10,9 +10,12 @@ financial advice.
 """
 
 import re
+import os
 import json
+import hashlib
 import time
 import io
+import secrets
 from contextlib import contextmanager
 import bcrypt
 import pyotp
@@ -61,18 +64,85 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 # ----------------------------------------------------------------------
 USERS_FILE = "bullbear_users.json"
 
+# Everything this app persists lives in one directory beside the code. Two
+# reasons it's a named constant rather than a bare relative filename: it
+# keeps user data out of whatever working directory Streamlit happens to be
+# launched from, and it gives the path helpers below a single root to
+# confine writes to.
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_data")
+
+# Usernames are allowed letters, digits, underscore, hyphen and dot, 3-32
+# characters, and may not start with a dot. This is not cosmetic: usernames
+# are interpolated into per-user filenames (watchlist, journal, Telegram
+# credentials, digest snapshot), so without a whitelist a name like
+# "../../etc/cron.d/x" would direct a write outside the data directory.
+# Whitelisting the allowed characters is the reliable direction here —
+# blacklisting "../" misses encoded, absolute and Windows-style variants.
+USERNAME_PATTERN = re.compile(r"^(?!\.)[A-Za-z0-9._-]{3,32}$")
+
+# Per-account throttle on failed sign-ins. Held in memory, so it resets when
+# the server restarts — but the point is to make online password guessing
+# slow rather than to survive forever, and an in-memory counter costs
+# nothing and needs no database.
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_LOCKOUT_SECONDS = 300
+
+
+def _ensure_data_dir() -> None:
+    """Creates the data directory, readable only by the account running the app."""
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+
+
+def is_valid_username(name: str) -> bool:
+    return bool(USERNAME_PATTERN.match(name or ""))
+
+
+def user_data_path(filename: str) -> str:
+    """
+    Resolves a filename inside DATA_DIR and refuses anything that escapes it.
+
+    Callers already pass validated usernames, so this is the second of two
+    independent checks rather than the only one. That redundancy is
+    deliberate: the validation regex guards new accounts, and this guards
+    every write regardless of where the name came from — including accounts
+    created before the regex existed.
+    """
+    _ensure_data_dir()
+    resolved = os.path.realpath(os.path.join(DATA_DIR, filename))
+    if os.path.commonpath([resolved, os.path.realpath(DATA_DIR)]) != os.path.realpath(DATA_DIR):
+        raise ValueError("Refusing to access a path outside the data directory.")
+    return resolved
+
+
+def write_private_json(path: str, payload) -> None:
+    """
+    Writes JSON that only the owning OS account can read.
+
+    The mode is applied before any content is written — creating the file
+    world-readable and chmod-ing afterwards leaves a window where another
+    local user can read it. That matters most for the Telegram bot token and
+    the TOTP secrets, which are live credentials sitting on disk.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(payload, f, indent=2)
+
 
 def load_users() -> dict:
-    try:
-        with open(USERS_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    # Accounts used to live beside the app rather than in DATA_DIR. If that
+    # older file is present and the new one is not, adopt it, so upgrading
+    # doesn't silently orphan everyone's existing account.
+    for path in (user_data_path(USERS_FILE), USERS_FILE):
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, ValueError, OSError):
+            continue
+    return {}
 
 
 def save_users(users: dict) -> None:
-    with open(USERS_FILE, "w") as f:
-        json.dump(users, f, indent=2)
+    write_private_json(user_data_path(USERS_FILE), users)
 
 
 def hash_password(password: str) -> str:
@@ -86,7 +156,69 @@ def check_password(password: str, hashed: str) -> bool:
         return False
 
 
-st.set_page_config(page_title="Tickveil", page_icon="🕯️", layout="wide", initial_sidebar_state="expanded")
+@st.cache_resource(show_spinner=False)
+def dummy_password_hash() -> str:
+    """
+    A valid bcrypt hash of a random string, checked against whenever someone
+    signs in with a username that doesn't exist. Its only job is to make the
+    unknown-username path cost the same wall-clock time as the wrong-password
+    path, so response timing can't be used to enumerate who has an account.
+
+    Cached deliberately. Streamlit re-executes this entire script on every
+    widget interaction, and generating a bcrypt hash costs ~270ms at the
+    default work factor — computing it at module scope would have added that
+    delay to every click in the app, not just to sign-in.
+    """
+    return hash_password(secrets.token_urlsafe(32))
+
+
+def password_problem(password: str) -> str | None:
+    """
+    Returns a plain-English reason the password is too weak, or None.
+
+    Length is the requirement that actually matters against offline
+    cracking, so the floor is 10 rather than 8. The other two rules reject
+    the two patterns that show up most in real breach corpora — a single
+    repeated character, and an unbroken keyboard run — without imposing the
+    symbol-and-digit theatre that pushes people toward "Password1!".
+    """
+    if len(password) < 10:
+        return "Use at least 10 characters — length matters more than symbols."
+    if len(set(password)) < 4:
+        return "That's too few distinct characters to be hard to guess."
+    lowered = password.lower()
+    for run in ("qwertyuiop", "asdfghjkl", "zxcvbnm", "0123456789", "abcdefghijklmnop"):
+        for i in range(len(run) - 5):
+            if run[i:i + 6] in lowered:
+                return "Avoid straight keyboard or alphabet runs."
+    return None
+
+
+def login_lockout_remaining(username_attempted: str) -> int:
+    """Seconds still to wait before this account will accept another attempt."""
+    record = st.session_state.get("login_failures", {}).get(username_attempted)
+    if not record or record["count"] < MAX_LOGIN_ATTEMPTS:
+        return 0
+    elapsed = time.time() - record["last"]
+    return max(0, int(LOGIN_LOCKOUT_SECONDS - elapsed))
+
+
+def note_login_failure(username_attempted: str) -> None:
+    failures = st.session_state.setdefault("login_failures", {})
+    record = failures.setdefault(username_attempted, {"count": 0, "last": 0.0})
+    # A lockout that has already expired starts the count over rather than
+    # leaving the account permanently one failure from locking.
+    if record["count"] >= MAX_LOGIN_ATTEMPTS and time.time() - record["last"] > LOGIN_LOCKOUT_SECONDS:
+        record["count"] = 0
+    record["count"] += 1
+    record["last"] = time.time()
+
+
+def clear_login_failures(username_attempted: str) -> None:
+    st.session_state.get("login_failures", {}).pop(username_attempted, None)
+
+
+st.set_page_config(page_title="Tickveil", page_icon="🕯️", layout="wide", initial_sidebar_state="collapsed")
 
 # ----------------------------------------------------------------------
 # 1b. VISUAL SYSTEM — "private wealth terminal"
@@ -1175,6 +1307,138 @@ hr, [data-testid="stDivider"] hr {
 }
 
 /* ==================================================================
+   MARKET TAPE — the index strip across the top
+   ================================================================== */
+.tv-tapebar {
+    display: flex;
+    gap: 0;
+    margin: 0.2rem 0 1.1rem;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.012));
+    backdrop-filter: blur(14px);
+    box-shadow: var(--shadow-sm);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    animation: reveal-up 0.6s var(--ease) both;
+}
+.tv-tapebar::-webkit-scrollbar { display: none; }
+.tv-tick {
+    flex: 0 0 auto;
+    min-width: 140px;
+    padding: 0.6rem 0.95rem;
+    border-right: 1px solid var(--line);
+    transition: background 0.4s var(--ease);
+}
+.tv-tick:last-child { border-right: none; }
+.tv-tick:hover { background: rgba(212, 176, 120, 0.055); }
+.tv-tick-top { display: flex; align-items: baseline; gap: 0.4rem; }
+.tv-tick-name {
+    font-family: var(--font-ui);
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--text-200);
+    white-space: nowrap;
+}
+/* The plain-language gloss that a real terminal leaves out */
+.tv-tick-plain {
+    font-family: var(--font-ui);
+    font-size: 0.56rem;
+    letter-spacing: 0.07em;
+    color: var(--text-500);
+    white-space: nowrap;
+}
+.tv-tick-bot { display: flex; align-items: baseline; gap: 0.5rem; margin-top: 0.22rem; white-space: nowrap; }
+.tv-tick-val {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--text-100);
+}
+.tv-tick-chg {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.7rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.tv-tick-chg.pos { color: var(--jade); }
+.tv-tick-chg.neg { color: var(--rose); }
+
+/* ==================================================================
+   EXPLAIN MODE — the plain-English gloss under a dense panel
+   ================================================================== */
+.tv-explain {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.7rem;
+    margin: 0.45rem 0 0.9rem;
+    padding: 0.7rem 0.95rem;
+    border-radius: 10px;
+    border: 1px solid rgba(95, 207, 155, 0.16);
+    border-left: 2px solid rgba(95, 207, 155, 0.55);
+    background: rgba(95, 207, 155, 0.045);
+    animation: fade-slide 0.45s var(--ease) both;
+}
+.tv-explain-tag {
+    flex: 0 0 auto;
+    font-family: var(--font-ui);
+    font-size: 0.56rem;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--jade);
+    padding-top: 0.16rem;
+    white-space: nowrap;
+}
+.tv-explain-body {
+    font-family: var(--font-ui);
+    font-size: 0.83rem;
+    line-height: 1.62;
+    color: var(--text-200);
+}
+
+/* ==================================================================
+   STATUS BAR — pinned terminal readout
+   ================================================================== */
+.tv-statusbar {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.4rem 1.1rem;
+    border-top: 1px solid var(--line-gold);
+    background: rgba(5, 7, 11, 0.975);
+    backdrop-filter: blur(20px);
+    font-family: var(--font-mono);
+    font-size: 0.63rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--text-500);
+}
+.tv-sb-item { display: inline-flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
+.tv-sb-item b { color: var(--gold-400); font-weight: 600; }
+.tv-sb-sep { width: 1px; height: 11px; background: var(--line-strong); }
+.tv-sb-spacer { flex: 1 1 auto; }
+.tv-sb-time { color: var(--text-300); }
+.tv-sb-dot {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--jade);
+    box-shadow: 0 0 8px rgba(95, 207, 155, 0.9);
+    animation: sb-blink 2.6s var(--ease) infinite;
+}
+/* Keeps the last of the page clear of the fixed bar */
+[data-testid="stMainBlockContainer"], .block-container { padding-bottom: 3.2rem !important; }
+
+/* ==================================================================
    MOTION
    ================================================================== */
 @keyframes page-in    { from { opacity: 0; } to { opacity: 1; } }
@@ -1191,6 +1455,7 @@ hr, [data-testid="stDivider"] hr {
     75%  { transform: scale(2.1);  opacity: 0; }
     100% { transform: scale(2.1);  opacity: 0; }
 }
+@keyframes sb-blink { 0%, 62%, 100% { opacity: 1; } 80% { opacity: 0.28; } }
 
 /* Staggered entrance: each top-level block arrives a beat after the one
    above it, so the page assembles rather than flashing into place. */
@@ -1218,26 +1483,201 @@ hr, [data-testid="stDivider"] hr {
 }
 
 /* ==================================================================
-   RESPONSIVE — the layout has to survive a phone
+   RESPONSIVE — the phone is a first-class target, not a fallback
+
+   Three things break a Streamlit dashboard on a phone, and all three are
+   fixed here rather than hidden:
+
+     1. st.columns does not stack. Four metrics in a row become four
+        unreadable slivers. Below the breakpoint the horizontal block is
+        allowed to wrap and each column takes a minimum width, so a
+        four-metric row lands as a tidy 2x2 instead.
+     2. Eleven tabs wrap into four stacked rows that push the content off
+        screen. The rail becomes a single horizontally-scrolling line with
+        scroll snapping and a fade at the right edge to signal there's
+        more.
+     3. Hover states are the only affordance on some controls, and a
+        touchscreen has no hover. Tap targets go to the 44px minimum and
+        the hover-lift transforms are dropped, since a card that lifts
+        under a finger just looks like a rendering glitch.
    ================================================================== */
-@media (max-width: 640px) {
-    [data-testid="stMainBlockContainer"], .block-container { padding-top: 1.2rem !important; }
-    .tv-mark { font-size: 1.95rem; }
-    .tv-auth-mark { font-size: 2.7rem; }
-    .tv-tagline { font-size: 0.6rem; letter-spacing: 0.24em; }
+
+/* Tablet: mostly desktop, with a slightly tighter rhythm */
+@media (max-width: 1024px) {
+    [data-testid="stMainBlockContainer"], .block-container { padding-left: 1.1rem !important; padding-right: 1.1rem !important; }
+    .tv-mark { font-size: 2.25rem; }
+    .tv-verdict-r { font-size: 2.1rem; }
+}
+
+@media (max-width: 768px) {
+    /* --- Rhythm --- */
+    [data-testid="stMainBlockContainer"], .block-container {
+        padding-top: 0.9rem !important;
+        padding-left: 0.85rem !important;
+        padding-right: 0.85rem !important;
+        padding-bottom: 1.5rem !important;
+    }
+
+    /* --- Masthead: brand over status, both left-aligned --- */
+    .tv-brandrow { flex-direction: column; align-items: flex-start; gap: 0.7rem; }
+    .tv-mark { font-size: 2.1rem; }
+    .tv-markdot { width: 6px; height: 6px; margin-bottom: 0.4rem; }
+    .tv-tagline { font-size: 0.56rem; letter-spacing: 0.22em; }
+    .tv-masthead { padding: 1rem 0 1.1rem; }
+    .tv-statusrow { gap: 0.35rem; }
+    .tv-pill { font-size: 0.6rem; padding: 0.3rem 0.6rem; }
+
+    /* --- Type --- */
     h1 { font-size: 1.5rem !important; }
     h2 { font-size: 1.2rem !important; }
-    h3 { font-size: 1.02rem !important; margin-top: 1.5rem !important; }
-    [data-testid="stMetricValue"] { font-size: 1.15rem !important; }
-    [data-testid="stMetric"] { padding: 0.8rem 0.85rem; }
-    .tv-tape { gap: 0 0.95rem; padding: 0.8rem 0.9rem; }
-    .tv-tape-sym, .tv-tape-last { font-size: 1.18rem; }
+    h3 { font-size: 1.06rem !important; margin-top: 1.6rem !important; }
+    p, li, .stMarkdown { font-size: 0.92rem; }
+
+    /* --- Columns wrap instead of squeezing --- */
+    [data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap !important;
+        gap: 0.6rem !important;
+    }
+    [data-testid="stColumn"] {
+        min-width: calc(50% - 0.3rem) !important;
+        flex: 1 1 calc(50% - 0.3rem) !important;
+    }
+    /* Anything genuinely narrow (a 1:2:1 gutter) collapses away instead of
+       leaving an orphan sliver beside the content it was padding. */
+    [data-testid="stColumn"]:empty { display: none !important; }
+
+    /* --- Metrics --- */
+    [data-testid="stMetric"] { padding: 0.75rem 0.8rem 0.68rem; }
+    [data-testid="stMetricValue"], [data-testid="stMetricValue"] p,
+    [data-testid="stMetricValue"] div { font-size: 1.18rem !important; }
+    [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p { font-size: 0.58rem !important; letter-spacing: 0.13em !important; }
+
+    /* --- Tabs: one scrolling line, snapped --- */
+    [data-baseweb="tab-list"], [role="tablist"] {
+        flex-wrap: nowrap !important;
+        overflow-x: auto !important;
+        overflow-y: hidden !important;
+        scroll-snap-type: x proximity;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        /* Streamlit overlays its own ‹ › scroll arrows at each end of the
+           rail. Without this inset the first and last tabs sit underneath
+           them and read as clipped. */
+        padding-left: 1.7rem !important;
+        padding-right: 1.7rem !important;
+        scroll-padding-left: 1.7rem;
+        /* Fades the right edge so it's visible that the rail continues */
+        -webkit-mask-image: linear-gradient(90deg, #000 90%, transparent 100%);
+        mask-image: linear-gradient(90deg, #000 90%, transparent 100%);
+    }
+    /* Same treatment for the market tape, which also scrolls past the edge */
+    .tv-tapebar {
+        -webkit-mask-image: linear-gradient(90deg, #000 90%, transparent 100%);
+        mask-image: linear-gradient(90deg, #000 90%, transparent 100%);
+    }
+    [data-baseweb="tab-list"]::-webkit-scrollbar, [role="tablist"]::-webkit-scrollbar { display: none; }
+    [data-baseweb="tab"], [data-testid="stTab"], [role="tab"] {
+        flex: 0 0 auto !important;
+        scroll-snap-align: start;
+        padding: 0.55rem 0.75rem !important;
+        min-height: 40px;
+        display: flex !important;
+        align-items: center;
+    }
+    [data-baseweb="tab"] p, [data-testid="stTab"] p, [role="tab"] p {
+        font-size: 0.63rem !important;
+        letter-spacing: 0.1em !important;
+    }
+
+    /* --- Quote tape: two-column grid, headline row spanning both --- */
+    .tv-tape {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.75rem 0.9rem;
+        padding: 0.85rem 0.9rem;
+        align-items: start;
+    }
+    .tv-tape-sym { grid-column: 1 / -1; font-size: 1.3rem; }
+    .tv-tape-last { font-size: 1.45rem; }
+    .tv-tape-chg { justify-self: start; font-size: 0.85rem; }
     .tv-tape-sep { display: none; }
-    .tv-verdict { padding: 1.15rem 1.2rem; }
-    .tv-verdict-val { font-size: 1.5rem; }
-    .tv-verdict-r { font-size: 1.85rem; }
-    [data-baseweb="tab"] { padding: 0.42rem 0.66rem !important; font-size: 0.62rem !important; }
-    [data-baseweb="tab"] p { font-size: 0.62rem !important; }
+    .tv-tape::after { display: none; }  /* the sweep reads as a glitch on a small grid */
+
+    /* --- Market tape: free horizontal scroll --- */
+    .tv-tick { min-width: 118px; padding: 0.55rem 0.8rem; }
+
+    /* --- Verdict: stack, big number to the left under the text --- */
+    .tv-verdict {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.85rem;
+        padding: 1.1rem 1.1rem;
+    }
+    .tv-verdict-val { font-size: 1.55rem; }
+    .tv-verdict-note { font-size: 0.83rem; max-width: none; }
+    .tv-verdict-r { font-size: 2.1rem; text-align: left; }
+    .tv-verdict-rsub { text-align: left; }
+
+    /* --- Explain callout stacks its tag above the text --- */
+    .tv-explain { flex-direction: column; gap: 0.3rem; padding: 0.65rem 0.8rem; }
+    .tv-explain-body { font-size: 0.85rem; }
+
+    /* --- Touch targets --- */
+    .stButton > button, .stDownloadButton > button,
+    [data-testid="stFormSubmitButton"] > button,
+    button[data-testid^="stBaseButton-"] {
+        min-height: 44px;
+        padding: 0.7rem 1rem !important;
+        width: 100%;
+    }
+    input, textarea, [data-testid="stTextInputField"] { min-height: 44px; font-size: 16px !important; }
+    [data-testid="stSlider"] { padding: 0.3rem 0.4rem; }
+
+    /* --- No hover physics on a touchscreen --- */
+    [data-testid="stVerticalBlockBorderWrapper"]:hover,
+    [data-testid="stVerticalBlock"]:has(> [data-testid="stElementContainer"] .tv-card-mark):hover,
+    [data-testid="stMetric"]:hover,
+    .stButton > button:hover, button[data-testid^="stBaseButton-"]:hover {
+        transform: none !important;
+    }
+    .modebar { display: none !important; }
+
+    /* --- Wide content scrolls inside itself, never the page body --- */
+    [data-testid="stDataFrame"], [data-testid="stTable"] { overflow-x: auto !important; }
+    [data-testid="stPlotlyChart"] { padding: 0.3rem; }
+
+    /* --- Status bar: in the flow, not pinned over the content --- */
+    .tv-statusbar {
+        position: static;
+        flex-wrap: wrap;
+        gap: 0.4rem 0.6rem;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--line-gold);
+        margin-top: 1.4rem;
+        font-size: 0.58rem;
+    }
+    .tv-sb-spacer { display: none; }
+
+    /* --- Auth screen --- */
+    .tv-auth { padding: 1.6rem 0 1rem; }
+    .tv-auth-mark { font-size: 2.6rem; }
+    .tv-auth-lede { font-size: 0.86rem; }
+    .tv-foot { margin-top: 2.2rem; }
+}
+
+/* Very narrow phones: give the metrics a full row each rather than
+   letting two of them share 160px and wrap their labels to three lines. */
+@media (max-width: 420px) {
+    [data-testid="stColumn"] { min-width: 100% !important; flex-basis: 100% !important; }
+    .tv-tape { grid-template-columns: 1fr; }
+    .tv-mark { font-size: 1.85rem; }
+    .tv-auth-mark { font-size: 2.15rem; }
+    .tv-tape-last { font-size: 1.3rem; }
+}
+
+/* Landscape phone: the fixed status bar would eat a third of the height */
+@media (max-height: 520px) {
+    .tv-statusbar { position: static; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -1263,6 +1703,29 @@ def card():
     with st.container(border=True) as c:
         st.markdown('<span class="tv-card-mark"></span>', unsafe_allow_html=True)
         yield c
+
+
+# NOTE ON PLACEMENT: this lives here, above the tab bodies, because
+# Streamlit re-executes the whole script top-to-bottom on every
+# interaction. The Settings tab calls it, and the Settings tab body runs
+# long before the analysis helpers further down are defined — so keeping
+# this next to those helpers raised NameError the moment anyone actually
+# pressed the send button.
+# ----------------------------------------------------------------------
+# 13. TELEGRAM NOTIFICATIONS — neutral tilt updates, sent manually.
+#     Note: Streamlit only runs when someone has the page open or clicks
+#     something. This can NOT silently monitor the market and text you
+#     unattended 24/7 — true background monitoring needs separate
+#     infrastructure (e.g. a scheduled script running on its own).
+# ----------------------------------------------------------------------
+def send_telegram_message(bot_token: str, chat_id: str, message: str) -> tuple[bool, str]:
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        resp = requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=10)
+        resp.raise_for_status()
+        return True, "Sent."
+    except Exception as e:
+        return False, str(e)
 
 
 users = load_users()
@@ -1303,14 +1766,36 @@ if not st.session_state.get("authenticated"):
                 )
 
             if login_submitted:
-                user_record = users.get(login_username)
-                if user_record and check_password(login_password, user_record["password_hash"]):
-                    st.session_state["authenticated"] = True
-                    st.session_state["username"] = login_username
-                    st.session_state["name"] = user_record.get("name", login_username)
-                    st.rerun()
+                waiting = login_lockout_remaining(login_username)
+                if waiting:
+                    st.error(
+                        f"Too many failed attempts for this account. "
+                        f"Try again in {waiting // 60}m {waiting % 60}s."
+                    )
                 else:
-                    st.error("Incorrect username or password.")
+                    user_record = users.get(login_username)
+                    # bcrypt is run even when the username is unknown, against a
+                    # throwaway hash. Returning instantly for a bad username and
+                    # slowly for a good one leaks which accounts exist, and that
+                    # timing gap is measurable over a network.
+                    stored_hash = (user_record or {}).get("password_hash") or dummy_password_hash()
+                    password_ok = check_password(login_password, stored_hash)
+
+                    if user_record and password_ok:
+                        clear_login_failures(login_username)
+                        st.session_state["authenticated"] = True
+                        st.session_state["username"] = login_username
+                        st.session_state["name"] = user_record.get("name", login_username)
+                        st.rerun()
+                    else:
+                        note_login_failure(login_username)
+                        left = MAX_LOGIN_ATTEMPTS - st.session_state["login_failures"][login_username]["count"]
+                        # One message for both failure modes, so the form never
+                        # confirms that a username is registered.
+                        st.error(
+                            "Incorrect username or password."
+                            + (f" {left} attempt(s) left before a temporary lock." if 0 < left <= 2 else "")
+                        )
 
         with register_tab:
             with st.form("register_form"):
@@ -1323,14 +1808,20 @@ if not st.session_state.get("authenticated"):
                 )
 
             if reg_submitted:
+                _pw_problem = password_problem(reg_password)
                 if not reg_name or not reg_username or not reg_password:
                     st.error("Please fill in all fields.")
+                elif not is_valid_username(reg_username):
+                    st.error(
+                        "Usernames can use letters, numbers, dot, underscore and hyphen, "
+                        "must be 3–32 characters, and can't start with a dot."
+                    )
                 elif reg_username in users:
                     st.error("That username is already taken.")
                 elif reg_password != reg_password_confirm:
                     st.error("Passwords don't match.")
-                elif len(reg_password) < 8:
-                    st.error("Password should be at least 8 characters.")
+                elif _pw_problem:
+                    st.error(_pw_problem)
                 else:
                     users[reg_username] = {
                         "name": reg_name,
@@ -1354,6 +1845,15 @@ if not st.session_state.get("authenticated"):
 username = st.session_state["username"]
 user_record = users[username]
 totp_enabled = user_record.get("totp_enabled", False)
+
+# Every per-user filename is built from this, never from `username` directly.
+# Accounts created before username validation existed may hold characters
+# that are unsafe in a path, so anything outside the whitelist collapses to
+# an underscore here. The digest suffix keeps two different original names
+# from colliding on the same sanitised string (e.g. "a/b" and "a:b").
+safe_username = re.sub(r"[^A-Za-z0-9._-]", "_", username)[:32].lstrip(".") or "user"
+if safe_username != username:
+    safe_username = f"{safe_username}_{hashlib.sha256(username.encode()).hexdigest()[:8]}"
 
 if totp_enabled and not st.session_state.get(f"totp_verified_{username}", False):
     st.markdown(
@@ -1396,6 +1896,119 @@ if totp_enabled and not st.session_state.get(f"totp_verified_{username}", False)
 # exchange connection — an expensive-looking product that lies about its
 # data source is just a nicer-looking lie.
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# RATE-LIMIT HANDLING — yfinance scrapes Yahoo's public site rather than
+# using an official paid API, and Yahoo rate-limits more aggressively for
+# cloud-hosted traffic (many apps sharing the same IP range) than for a
+# home connection. This retries briefly before giving up, and longer
+# cache times below reduce how often we hit Yahoo in the first place.
+# ----------------------------------------------------------------------
+def _is_rate_limit_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    return "429" in msg or "too many requests" in msg or "rate limit" in msg
+
+
+def yf_call_with_retry(fn, retries: int = 2, delay_seconds: float = 4.0):
+    """Runs a yfinance call, retrying briefly on rate-limit errors before giving up."""
+    last_exception = None
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_exception = e
+            if _is_rate_limit_error(e) and attempt < retries:
+                time.sleep(delay_seconds)
+                continue
+            raise
+    raise last_exception
+
+
+# ----------------------------------------------------------------------
+# MARKET TAPE — the strip of index levels across the top of every trading
+# terminal. Here it does one extra job: each instrument carries a short
+# plain-English name ("US large caps", "Fear gauge") alongside its symbol,
+# so someone who doesn't know what ^GSPC or ^VIX is can still read the row.
+#
+# Fetched in a single batched download and cached for 5 minutes. If the
+# fetch fails the strip renders nothing at all rather than a row of dashes
+# — a broken tape is worse than no tape.
+# ----------------------------------------------------------------------
+TAPE_INSTRUMENTS = [
+    ("^GSPC", "S&P 500", "US large caps"),
+    ("^IXIC", "Nasdaq", "US tech-heavy"),
+    ("^DJI", "Dow Jones", "US blue chips"),
+    ("^VIX", "VIX", "Fear gauge"),
+    ("^TNX", "US 10Y", "Bond yield"),
+    ("GC=F", "Gold", "Safe haven"),
+    ("BTC-USD", "Bitcoin", "Crypto"),
+]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_market_tape() -> list[dict]:
+    """Last level and session change for each tape instrument."""
+    symbols = [sym for sym, _, _ in TAPE_INSTRUMENTS]
+    try:
+        raw = yf_call_with_retry(
+            lambda: yf.download(symbols, period="5d", interval="1d",
+                                progress=False, group_by="ticker", auto_adjust=True),
+            retries=1, delay_seconds=2.0,
+        )
+    except Exception:
+        return []
+    if raw is None or raw.empty:
+        return []
+
+    out = []
+    for symbol, label, plain in TAPE_INSTRUMENTS:
+        try:
+            closes = raw[symbol]["Close"].dropna()
+            if len(closes) < 2:
+                continue
+            last, prev = float(closes.iloc[-1]), float(closes.iloc[-2])
+            if prev == 0:
+                continue
+            out.append({
+                "label": label,
+                "plain": plain,
+                "value": last,
+                "change_pct": (last / prev - 1) * 100,
+            })
+        except Exception:
+            continue  # one bad instrument shouldn't empty the whole tape
+    return out
+
+
+def render_market_tape() -> None:
+    """Draws the index strip, or nothing if the data didn't arrive."""
+    try:
+        rows = get_market_tape()
+    except Exception:
+        rows = []
+    if not rows:
+        return
+
+    cells = []
+    for row in rows:
+        direction = "pos" if row["change_pct"] >= 0 else "neg"
+        arrow = "▲" if row["change_pct"] >= 0 else "▼"
+        # Index levels want thousands separators; a sub-100 level (VIX, the
+        # 10-year yield) wants two decimals and no separator.
+        value = f"{row['value']:,.2f}" if row["value"] >= 100 else f"{row['value']:.2f}"
+        cells.append(
+            f'<div class="tv-tick">'
+            f'<div class="tv-tick-top">'
+            f'<span class="tv-tick-name">{html_lib.escape(row["label"])}</span>'
+            f'<span class="tv-tick-plain">{html_lib.escape(row["plain"])}</span>'
+            f'</div>'
+            f'<div class="tv-tick-bot">'
+            f'<span class="tv-tick-val">{value}</span>'
+            f'<span class="tv-tick-chg {direction}">{arrow} {abs(row["change_pct"]):.2f}%</span>'
+            f'</div></div>'
+        )
+    st.markdown(f'<div class="tv-tapebar">{"".join(cells)}</div>', unsafe_allow_html=True)
+
+
 st.markdown('<div id="tv-top"></div>', unsafe_allow_html=True)
 st.markdown(
     f"""
@@ -1417,11 +2030,58 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+render_market_tape()
+
 st.caption(
     "Educational tool only. Shows public price data, indicators, news, and "
     "a statistical price range based on past volatility. Nothing here is "
     "a prediction or a buy/sell recommendation."
 )
+
+# ----------------------------------------------------------------------
+# EXPLAIN MODE — the one thing a Bloomberg terminal will never do for you.
+#
+# A professional terminal assumes you already know what a z-score against a
+# peer group means. That assumption is exactly what makes it unusable for
+# the first year. Explain mode keeps the dense readout intact and adds a
+# plain-English sentence under each panel saying what the number actually
+# means and what it does NOT mean — so the same screen serves someone
+# learning and someone who just wants the figure.
+#
+# It defaults ON. Someone who finds it noisy turns it off in one click;
+# someone who needed it would never have known to turn it on.
+# ----------------------------------------------------------------------
+# Only the explain toggle sits in the header. Logout lives in Settings
+# beside the other account controls: on a phone every header control becomes
+# a full-width row, and a full-width LOG OUT button directly under the
+# masthead reads as the primary action on the page, which it very much isn't.
+_head_pad, _head_toggle = st.columns([5, 2])
+with _head_toggle:
+    explain_mode = st.toggle(
+        "Explain mode",
+        value=True,
+        key="explain_mode",
+        help="Adds a plain-English note under each panel explaining what the "
+             "numbers mean and what they don't. Turn it off for a dense, "
+             "terminal-style readout.",
+    )
+
+
+def explain(text: str) -> None:
+    """
+    Renders a plain-English gloss for the panel above, when explain mode is on.
+
+    Deliberately a no-op rather than a collapsed expander when off: an
+    expander still occupies a row and breaks the density that makes the
+    terse mode worth having.
+    """
+    if not st.session_state.get("explain_mode", True):
+        return
+    st.markdown(
+        f'<div class="tv-explain"><span class="tv-explain-tag">In plain English</span>'
+        f'<span class="tv-explain-body">{html_lib.escape(text)}</span></div>',
+        unsafe_allow_html=True,
+    )
 
 
 with st.expander("New to these terms? A short glossary"):
@@ -1439,31 +2099,18 @@ with st.expander("New to these terms? A short glossary"):
 # 2. SIDEBAR — USER INPUTS
 # ----------------------------------------------------------------------
 
-# Compact identity + logout — full account settings (password, 2FA) live in the Settings tab.
-st.sidebar.markdown(
-    f"""
-<div style="padding:0.2rem 0 1rem;">
-  <div style="font-family:Inter,sans-serif;font-size:0.58rem;letter-spacing:0.26em;
-              text-transform:uppercase;color:#7E786C;font-weight:600;">Signed in as</div>
-  <div style="font-family:Fraunces,Georgia,serif;font-size:1.3rem;font-weight:600;
-              letter-spacing:-0.02em;color:#F4F1EA;margin-top:0.28rem;">
-    {html_lib.escape(str(st.session_state.get('name', '')))}
-  </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-if st.sidebar.button("Log out", use_container_width=True):
-    for _key in ["authenticated", "username", "name", f"totp_verified_{username}"]:
-        st.session_state.pop(_key, None)
-    st.rerun()
+# The sidebar is gone on purpose. It only ever held the signed-in name and a
+# logout button, and on a phone Streamlit renders it as an overlay that
+# squeezes the real content into a ~150px column until it's dismissed. The
+# name already appears in the masthead, and logout moved into the header row
+# above, where it costs no layout and needs no drawer to reach.
 
 # ----------------------------------------------------------------------
 # WATCHLIST PERSISTENCE — saves your watchlist to a small local file, one
 # per user account, so it's still there next time you log in. Lives next
 # to the app itself; nothing is sent anywhere.
 # ----------------------------------------------------------------------
-WATCHLIST_FILE = f"bullbear_watchlist_{username}.json"
+WATCHLIST_FILE = user_data_path(f"bullbear_watchlist_{safe_username}.json")
 DEFAULT_WATCHLIST = "AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA, JPM, XOM, JNJ"
 
 
@@ -1477,13 +2124,12 @@ def load_saved_watchlist() -> str:
 
 def save_watchlist(watchlist_text: str) -> None:
     try:
-        with open(WATCHLIST_FILE, "w") as f:
-            json.dump({"watchlist": watchlist_text}, f)
+        write_private_json(WATCHLIST_FILE, {"watchlist": watchlist_text})
     except OSError:
         pass  # non-critical — worst case, it just doesn't persist this time
 
 
-TELEGRAM_FILE = f"bullbear_telegram_{username}.json"
+TELEGRAM_FILE = user_data_path(f"bullbear_telegram_{safe_username}.json")
 
 
 def load_saved_telegram() -> dict:
@@ -1496,13 +2142,12 @@ def load_saved_telegram() -> dict:
 
 def save_telegram(bot_token: str, chat_id: str) -> None:
     try:
-        with open(TELEGRAM_FILE, "w") as f:
-            json.dump({"bot_token": bot_token, "chat_id": chat_id}, f)
+        write_private_json(TELEGRAM_FILE, {"bot_token": bot_token, "chat_id": chat_id})
     except OSError:
         pass  # non-critical — worst case, it just doesn't persist this time
 
 
-JOURNAL_FILE = f"bullbear_journal_{username}.json"
+JOURNAL_FILE = user_data_path(f"bullbear_journal_{safe_username}.json")
 
 
 def load_journal() -> list[dict]:
@@ -1515,13 +2160,12 @@ def load_journal() -> list[dict]:
 
 def save_journal(entries: list[dict]) -> None:
     try:
-        with open(JOURNAL_FILE, "w") as f:
-            json.dump(entries, f, indent=2)
+        write_private_json(JOURNAL_FILE, entries)
     except OSError:
         pass  # non-critical — worst case, it just doesn't persist this time
 
 
-DIGEST_SNAPSHOT_FILE = f"bullbear_digest_snapshot_{username}.json"
+DIGEST_SNAPSHOT_FILE = user_data_path(f"bullbear_digest_snapshot_{safe_username}.json")
 
 
 def load_digest_snapshot() -> dict:
@@ -1534,8 +2178,7 @@ def load_digest_snapshot() -> dict:
 
 def save_digest_snapshot(snapshot: dict) -> None:
     try:
-        with open(DIGEST_SNAPSHOT_FILE, "w") as f:
-            json.dump(snapshot, f, indent=2)
+        write_private_json(DIGEST_SNAPSHOT_FILE, snapshot)
     except OSError:
         pass  # non-critical — worst case, it just doesn't persist this time
 
@@ -1702,6 +2345,12 @@ with tab_settings:
 
     st.divider()
     st.subheader("Account")
+    st.caption(f"Signed in as {username}.")
+    if st.button("Log out of this session"):
+        for _key in ["authenticated", "username", "name", f"totp_verified_{username}"]:
+            st.session_state.pop(_key, None)
+        st.rerun()
+
     st.markdown("**Change password**")
     with st.form("change_password_form"):
         current_pw = st.text_input("Current password", type="password")
@@ -1710,12 +2359,13 @@ with tab_settings:
         pw_submitted = st.form_submit_button("Update password")
 
     if pw_submitted:
+        _new_pw_problem = password_problem(new_pw)
         if not check_password(current_pw, user_record["password_hash"]):
             st.error("Current password is incorrect.")
         elif new_pw != new_pw_confirm:
             st.error("New passwords don't match.")
-        elif len(new_pw) < 8:
-            st.error("New password should be at least 8 characters.")
+        elif _new_pw_problem:
+            st.error(_new_pw_problem)
         else:
             user_record["password_hash"] = hash_password(new_pw)
             save_users(users)
@@ -1761,33 +2411,6 @@ with tab_settings:
                     st.error("Incorrect code — try again.")
 
 
-
-
-# ----------------------------------------------------------------------
-# RATE-LIMIT HANDLING — yfinance scrapes Yahoo's public site rather than
-# using an official paid API, and Yahoo rate-limits more aggressively for
-# cloud-hosted traffic (many apps sharing the same IP range) than for a
-# home connection. This retries briefly before giving up, and longer
-# cache times below reduce how often we hit Yahoo in the first place.
-# ----------------------------------------------------------------------
-def _is_rate_limit_error(e: Exception) -> bool:
-    msg = str(e).lower()
-    return "429" in msg or "too many requests" in msg or "rate limit" in msg
-
-
-def yf_call_with_retry(fn, retries: int = 2, delay_seconds: float = 4.0):
-    """Runs a yfinance call, retrying briefly on rate-limit errors before giving up."""
-    last_exception = None
-    for attempt in range(retries + 1):
-        try:
-            return fn()
-        except Exception as e:
-            last_exception = e
-            if _is_rate_limit_error(e) and attempt < retries:
-                time.sleep(delay_seconds)
-                continue
-            raise
-    raise last_exception
 
 
 # ----------------------------------------------------------------------
@@ -2677,6 +3300,35 @@ def compute_signal_agreement(indicator_score: int, news_items: list[dict]) -> st
 # ----------------------------------------------------------------------
 # 7. TEXT CLEANUP — strips HTML tags/entities out of RSS descriptions
 # ----------------------------------------------------------------------
+def safe_link(url: str) -> str:
+    """
+    Returns the URL only if it's an ordinary web link, otherwise "".
+
+    Headlines and their URLs arrive from an upstream feed and get rendered
+    into markdown links. Without this check a "javascript:" or "data:" URL
+    from a poisoned feed item would become a clickable script in the page.
+    Allowing exactly http and https is the whole fix, and it costs nothing.
+    """
+    candidate = (url or "").strip()
+    if candidate.lower().startswith(("http://", "https://")):
+        # Whitespace and control characters can be used to smuggle a second
+        # scheme past a naive prefix check, so reject rather than clean them.
+        if not re.search(r"[\s<>\"']", candidate):
+            return candidate
+    return ""
+
+
+def markdown_safe(text: str) -> str:
+    """
+    Neutralises markdown control characters in text taken from a feed.
+
+    Interpolating a raw headline into f"[{title}]({link})" lets a title
+    containing a bracket close the link early and inject arbitrary markdown
+    after it. Escaping the delimiters keeps the headline as text.
+    """
+    return re.sub(r"([\[\]()*_`~<>|\\])", r"\\\1", text or "")
+
+
 def clean_html(raw_text: str) -> str:
     """Removes HTML tags (e.g. <p>) and decodes entities (e.g. &amp;) from RSS text."""
     if not raw_text:
@@ -2726,7 +3378,7 @@ def get_news_items(ticker_symbol: str, max_items: int = 6) -> list[dict]:
 
         items.append({
             "title": clean_html(title),
-            "link": link,
+            "link": safe_link(link),
             "published": str(published),
             "description": clean_html(description),
         })
@@ -3379,23 +4031,6 @@ def optimize_portfolio(tickers: list[str], iterations: int = 3000):
 
 
 # ----------------------------------------------------------------------
-# 13. TELEGRAM NOTIFICATIONS — neutral tilt updates, sent manually.
-#     Note: Streamlit only runs when someone has the page open or clicks
-#     something. This can NOT silently monitor the market and text you
-#     unattended 24/7 — true background monitoring needs separate
-#     infrastructure (e.g. a scheduled script running on its own).
-# ----------------------------------------------------------------------
-def send_telegram_message(bot_token: str, chat_id: str, message: str) -> tuple[bool, str]:
-    try:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        resp = requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=10)
-        resp.raise_for_status()
-        return True, "Sent."
-    except Exception as e:
-        return False, str(e)
-
-
-# ----------------------------------------------------------------------
 # DAILY DIGEST — a one-screen "here's what to look at today" summary,
 # pulling together watchlist tilt CHANGES (not just current state),
 # open Trade Journal positions vs. their stop/target, and upcoming
@@ -3619,13 +4254,21 @@ with tab_news:
             for item in market_news:
                 sentiment = tag_sentiment(item["title"] + " " + item.get("description", ""))
                 badge = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}[sentiment]
-                st.markdown(f"{badge} **[{item['title']}]({item['link']})**")
+                # Falls back to plain bold text when the feed gave us a URL
+                # that isn't an ordinary http(s) link.
+                _t = markdown_safe(item["title"])
+                st.markdown(f"{badge} **[{_t}]({item['link']})**" if item["link"] else f"{badge} **{_t}**")
                 if item["description"]:
                     st.caption(item["description"])
 
 
 with tab_tradesetup:
     st.subheader("Trade goal planner")
+    explain(
+        "You choose a gain you are aiming for and a loss you could live with. This converts those into "
+        "actual price levels, then checks this stock's own past to report how often it historically moved "
+        "that far within the window. Past frequency is not a probability for this time."
+    )
     st.warning(
         "⚠️ You set a plain target gain and a max loss you're comfortable with, and "
         "this shows how often THIS STOCK'S OWN PAST actually moved that much within "
@@ -4299,6 +4942,12 @@ if _analysis_run:
 
             # --- Indicator Lean (always from daily data) ---
             st.subheader("Indicator lean")
+            explain(
+                "Four well-known indicators are checked, and this counts how many currently point up "
+                "versus down. It describes where the price sits right now relative to its own recent "
+                "history — it is not a forecast, and a strong tilt has no bearing on what happens "
+                "tomorrow."
+            )
             lean, reasons, _score = compute_indicator_lean(latest_daily)
             st.session_state["last_lean"] = lean
             st.session_state["last_ticker"] = ticker
@@ -4332,6 +4981,12 @@ if _analysis_run:
 
             # --- Statistical price range (always from daily data) ---
             st.subheader(f"Statistical price range — next {horizon_days} trading day(s)")
+            explain(
+                "This takes how much the stock has bounced around lately and projects that same amount of "
+                "bounce forward. A wider range just means a more volatile stock. It assumes no direction "
+                "at all, so it is a measure of typical movement, not a guess at where the price is "
+                "heading."
+            )
             lower68, upper68 = compute_price_range(daily_df, horizon_days, confidence=0.68)
             lower95, upper95 = compute_price_range(daily_df, horizon_days, confidence=0.95)
             rcol1, rcol2 = st.columns(2)
@@ -4350,6 +5005,11 @@ if _analysis_run:
             #     numbers. Answers "what actually happened over similar windows
             #     historically" rather than forecasting what will happen now. ---
             st.subheader(f"Historical {horizon_days}-day outcomes (this stock's own past year)")
+            explain(
+                "Every window of this length in the past year is measured, then sorted. The median is the "
+                "middle outcome; the worst and best 10% show the tails. This is what already happened, "
+                "not what will happen — and one genuine surprise can land outside the entire range."
+            )
             scenario = historical_scenario_ranges(daily_df, horizon_days)
             if scenario:
                 scol1, scol2, scol3 = st.columns(3)
@@ -4368,6 +5028,11 @@ if _analysis_run:
 
             # --- Signal agreement — honest alternative to a fabricated confidence score ---
             st.subheader("Signal agreement")
+            explain(
+                "Read this as a prompt to look closer, not as a score. Disagreement is usually the more "
+                "interesting case: the chart describes what buyers and sellers have already done, while "
+                "the headlines describe something that may not be reflected in the price yet."
+            )
             st.write(compute_signal_agreement(_score, get_news_items(ticker)))
             st.caption(
                 "This just states whether the technical read and headline tone happen to "
@@ -4377,6 +5042,11 @@ if _analysis_run:
 
             # --- News ---
             st.subheader("Recent news")
+            explain(
+                "Tone is tagged by matching finance phrases like 'beats expectations' or 'cuts guidance' "
+                "first, and general word tone second. It reads the wording, not the substance — always "
+                "open the headline itself before drawing any conclusion from the colour of the chip."
+            )
             with st.spinner("Fetching headlines..."):
                 news_items = get_news_items(ticker)
 
@@ -4401,7 +5071,8 @@ if _analysis_run:
                             f'letter-spacing:0.19em;text-transform:uppercase;{pill_style}">{sentiment} tone</span>',
                             unsafe_allow_html=True,
                         )
-                        st.markdown(f"**[{item['title']}]({item['link']})**")
+                        _t = markdown_safe(item["title"])
+                        st.markdown(f"**[{_t}]({item['link']})**" if item["link"] else f"**{_t}**")
                         if item["published"]:
                             st.caption(item["published"])
                         if item["description"]:
@@ -4448,6 +5119,12 @@ if _analysis_run:
                          help="Annual dividend payments as a percentage of the current share price.")
 
             st.subheader("Analyst view")
+            explain(
+                "These are professional analysts' published price targets, averaged. They are opinions "
+                "with a mixed track record, frequently revised after the fact, and often clustered "
+                "because analysts read each other. Treat the spread between high and low as more "
+                "informative than the average."
+            )
             st.caption(
                 "These are published estimates from Wall Street analysts covering this "
                 "stock — not this app's own calculation, and not a guarantee of future price. "
@@ -4486,6 +5163,11 @@ if _analysis_run:
                     st.write("No dividend history — this stock may not pay dividends.")
 
             st.subheader("Risk profile")
+            explain(
+                "Max drawdown is the worst peak-to-trough fall in the window: the loss you would have sat "
+                "through at the very worst moment. Annualised volatility scales daily swings up to a "
+                "yearly figure so two stocks with different histories can be compared fairly."
+            )
             rcol_a, rcol_b, rcol_c = st.columns(3)
             rcol_a.metric("Beta", f"{fundamentals['beta']:.2f}" if fundamentals["beta"] else "N/A",
                           help="How much this stock has historically moved relative to the overall market. 1.0 = moves roughly with the market; above 1 = historically more volatile than the market; below 1 = historically less volatile.")
@@ -4511,6 +5193,11 @@ if _analysis_run:
 
             # --- Historical signal check (full regression stats, honestly caveated) ---
             st.subheader("Historical signal check")
+            explain(
+                "This asks a narrow question honestly: when this same signal appeared in this stock's "
+                "past, what happened next on average? Sample sizes are small and past windows overlap, so "
+                "read it as a sanity check on the signal, not as evidence that it works."
+            )
             bt = historical_signal_check(daily_df)
             if bt is None:
                 st.write("Not enough history to compute this check.")
@@ -4547,6 +5234,12 @@ if _analysis_run:
 
         with tab_factors:
             st.subheader(f"Factor Score — {ticker}")
+            explain(
+                "Four separate lenses on the same company, each scored 0-100 and then blended using the "
+                "weights you set. Value asks whether it is cheap against its peers, Quality whether the "
+                "business is sound, Momentum whether the price trend is strong, and Sentiment how recent "
+                "headlines read. Every sub-score opens up to show its own arithmetic."
+            )
             st.caption(
                 "A single, transparent 0-100 score built from four independently "
                 "well-documented factor styles: Value, Quality, Momentum, and News "
@@ -4802,6 +5495,11 @@ else:
 with tab_watchlist:
     st.divider()
     st.header("Watchlist scan")
+    explain(
+        "This runs the same indicator count and headline check across every ticker you list, then ranks "
+        "them side by side. It is a way to decide what deserves a closer look first — a ranking of "
+        "well-known signals, not a verdict on which stocks are good."
+    )
     st.caption(
         "Ranks the tickers you list by the same Indicator Lean + headline-tone "
         "heuristics used above — not a 'best stocks to buy' list. A high score "
@@ -4919,5 +5617,31 @@ st.markdown(
         </div>
     </div>
     """,
+    unsafe_allow_html=True,
+)
+
+# ----------------------------------------------------------------------
+# STATUS BAR — the readout every real terminal keeps pinned along the
+# bottom edge. It reports only things that are actually true: the data
+# source and its delay, the ticker currently loaded, whether explain mode
+# is on, and the time this page rendered.
+#
+# It's fixed to the viewport on desktop and static on narrow screens,
+# where a permanently pinned bar would eat scarce vertical space and sit
+# on top of the content it's meant to annotate.
+# ----------------------------------------------------------------------
+_status_ticker = st.session_state.get("last_ticker") or "—"
+st.markdown(
+    f"""
+<div class="tv-statusbar">
+  <span class="tv-sb-item"><span class="tv-sb-dot"></span>Yahoo Finance · delayed</span>
+  <span class="tv-sb-sep"></span>
+  <span class="tv-sb-item">Loaded <b>{html_lib.escape(str(_status_ticker))}</b></span>
+  <span class="tv-sb-sep"></span>
+  <span class="tv-sb-item">Explain {'ON' if st.session_state.get('explain_mode', True) else 'OFF'}</span>
+  <span class="tv-sb-spacer"></span>
+  <span class="tv-sb-item tv-sb-time">{datetime.now().strftime('%H:%M:%S')}</span>
+</div>
+""",
     unsafe_allow_html=True,
 )

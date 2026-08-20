@@ -1,8 +1,0 @@
-{
-  "Isaac77": {
-    "name": "Isaac",
-    "password_hash": "$2b$12$MfkZlPA024zsmUTD96LIbO3draL2r6dLCYeTfwZMhRQQwvpVKbVxy",
-    "totp_enabled": false,
-    "totp_secret": null
-  }
-}
