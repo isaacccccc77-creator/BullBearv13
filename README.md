@@ -27,6 +27,7 @@ python test_security.py
 python test_ordering.py
 python test_storage.py                      # JSON backend
 python test_scoring.py
+python test_entitlements.py
 TEST_DATABASE_URL=postgresql://... python test_storage.py   # both backends
 ```
 
@@ -76,8 +77,10 @@ written `0600`, with the mode set at creation rather than chmod-ed afterwards.
 | `test_ordering.py` | Guards the call-before-definition bug class described below. |
 | `test_storage.py` | Same contract asserted against both storage backends, plus the migration. |
 | `test_scoring.py` | Mathematical properties of the composite score, including p-value calibration. |
+| `test_entitlements.py` | Plan resolution and limits — every unknown input must fail closed to free. |
 | `storage.py` | Persistence. JSON files or Postgres, chosen by `DATABASE_URL`. |
 | `scoring.py` | The composite score. No Streamlit import, so the maths is testable directly. |
+| `entitlements.py` | Plans and feature limits. No payment logic, no Streamlit import. |
 | `.streamlit/config.toml` | Base theme (dark, champagne primary). |
 | `requirements.txt` | Dependencies. |
 
@@ -157,6 +160,49 @@ Bands are named for what the reading *is* — "strongly positive conditions" —
 never BUY or SELL. A score built from four correlated technical indicators over
 a six-month window is nowhere near strong enough evidence to issue an
 instruction, and the rest of the app does not issue them either.
+
+## Plans
+
+`entitlements.py` answers one question: given an account record, what is this
+person allowed to do right now? It holds no payment logic and imports no
+Streamlit.
+
+**The free tier keeps the whole analytical product** — any ticker, the full
+technical read, the composite score with its backtest, explain mode, news,
+fundamentals. Paywalling the analysis would gut the thing worth using and kill
+the funnel at the same time. What Pro buys is persistence, automation and
+volume: a bigger watchlist, an unlimited journal, CSV export, Telegram alerts,
+the daily digest, multi-asset. Those are the parts that cost real money to
+provide, which is what makes the price an exchange rather than a toll.
+
+| | Free | Pro — $5/mo or $45/yr |
+| --- | --- | --- |
+| Analysis, composite score, explain mode | full | full |
+| Watchlist scan | 5 tickers per run | unlimited |
+| Journal entries | 10 | unlimited |
+| Journal CSV export | — | yes |
+| Telegram alerts, daily digest, multi-asset | — | yes |
+
+Two rules the tests enforce:
+
+**Everything unrecognised fails closed to free.** An unknown plan name, a
+malformed expiry, a missing record — all resolve to free. The failure mode of
+a permissive default is giving away the product; the failure mode of a strict
+default is a support email.
+
+**A lapsed plan degrades the view, never the data.** A 40-ticker watchlist
+stays 40 tickers; the scan processes the first 5 and says so plainly. Journal
+entries beyond the cap stay readable and editable — only *adding* is blocked.
+Resubscribing restores everything instantly because nothing was ever removed.
+Deleting a lapsed customer's trade journal to enforce a limit is
+unforgivable, and it guarantees they never come back.
+
+Plans resolve at read time rather than via a nightly sweep, so a subscription
+that lapsed an hour ago takes effect now — which matters, because on this
+stack there is no background worker to run that sweep.
+
+Checkout is not wired up. The `plan` column exists and is enforced end to end;
+there is no way to pay for it from inside the app yet.
 
 ## Navigation
 

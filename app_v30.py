@@ -17,6 +17,7 @@ from contextlib import contextmanager
 import bcrypt
 import storage
 import scoring
+import entitlements
 import pyotp
 import qrcode
 import html as html_lib
@@ -1338,6 +1339,62 @@ hr, [data-testid="stDivider"] hr {
 .tv-tick-chg.neg { color: var(--rose); }
 
 /* ==================================================================
+   LOCKED FEATURE — the Pro panel
+
+   Styled as information, not as an obstacle: same glass as every other
+   card, a small tag rather than a padlock, no red. Someone hitting this
+   should read it as "here is something else this does", not as a wall.
+   ================================================================== */
+.tv-locked {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.85rem;
+    padding: 1rem 1.15rem;
+    margin: 0.5rem 0 1rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line);
+    border-left: 2px solid var(--gold-500);
+    background: linear-gradient(120deg, rgba(212,176,120,0.07), rgba(255,255,255,0.015));
+    backdrop-filter: blur(10px);
+    animation: fade-slide 0.45s var(--ease) both;
+}
+.tv-locked.inline { padding: 0.6rem 0.8rem; margin: 0.3rem 0 0.6rem; }
+.tv-locked-tag {
+    flex: 0 0 auto;
+    font-family: var(--font-ui);
+    font-size: 0.55rem;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: #0A0C11;
+    background: var(--gold-grad);
+    border-radius: 5px;
+    padding: 0.18rem 0.42rem;
+    margin-top: 0.15rem;
+}
+.tv-locked-body { display: flex; flex-direction: column; gap: 0.2rem; }
+.tv-locked-body b {
+    font-family: var(--font-ui);
+    font-size: 0.86rem;
+    font-weight: 600;
+    color: var(--text-100);
+}
+.tv-locked-body span {
+    font-family: var(--font-ui);
+    font-size: 0.8rem;
+    color: var(--text-300);
+    line-height: 1.55;
+}
+
+/* Plan badge in the masthead */
+.tv-pill.plan-pro {
+    border-color: rgba(212,176,120,0.5);
+    background: var(--gold-grad);
+    color: #0A0C11;
+    font-weight: 700;
+}
+
+/* ==================================================================
    CONTEXT CHIP — "you are acting on AAPL"
 
    Shown by tabs that follow the global command bar instead of carrying
@@ -1857,6 +1914,42 @@ if user_record is None:
     st.rerun()
 totp_enabled = user_record.get("totp_enabled", False)
 
+# ----------------------------------------------------------------------
+# PLAN
+#
+# Resolved from the account record on every run rather than cached, because
+# a subscription that lapsed an hour ago must take effect now. There is no
+# background worker on this stack to sweep expired plans, so read time is
+# the only moment the check can reliably happen.
+# ----------------------------------------------------------------------
+current_plan = entitlements.resolve_plan(user_record)
+plan_info = entitlements.describe(current_plan)
+
+
+def plan_allows(feature: str) -> bool:
+    return entitlements.allows(current_plan, feature)
+
+
+def upgrade_prompt(feature: str, *, inline: bool = False) -> None:
+    """
+    Renders the locked state for one feature.
+
+    Says what the feature does rather than scolding about the plan — someone
+    who has just discovered a capability should learn what it is in the same
+    breath as learning it is paid. No countdown, no interstitial, no
+    dark-pattern nagging: one calm panel that stays out of the way.
+    """
+    title, detail = entitlements.FEATURE_COPY.get(
+        feature, ("Pro feature", "Available on the Pro plan."))
+    st.markdown(
+        f'<div class="tv-locked{" inline" if inline else ""}">'
+        f'<div class="tv-locked-tag">Pro</div>'
+        f'<div class="tv-locked-body"><b>{html_lib.escape(title)}</b>'
+        f'<span>{html_lib.escape(detail)}</span></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
 if totp_enabled and not st.session_state.get(f"totp_verified_{username}", False):
     st.markdown(
         """
@@ -2011,6 +2104,16 @@ def render_market_tape() -> None:
     st.markdown(f'<div class="tv-tapebar">{"".join(cells)}</div>', unsafe_allow_html=True)
 
 
+# Pro accounts get a badge; free accounts get nothing rather than a "FREE"
+# label, which would read as a nag on every screen.
+#
+# It is interpolated on the SAME LINE as the span before it, deliberately. On
+# its own line an empty badge leaves a blank line inside the masthead's HTML,
+# and markdown ends an HTML block at the first blank line — which dumped the
+# remaining closing tags onto the page as visible "</div>" text.
+plan_badge_html = ('<span class="tv-pill plan-pro">Pro</span>'
+                   if plan_info["is_pro"] else "")
+
 st.markdown('<div id="tv-top"></div>', unsafe_allow_html=True)
 st.markdown(
     f"""
@@ -2025,7 +2128,7 @@ st.markdown(
     <div class="tv-statusrow">
       <span class="tv-pill"><span class="tv-dot"></span>Delayed feed</span>
       <span class="tv-pill">{datetime.now().strftime('%d %b %Y · %H:%M')}</span>
-      <span class="tv-pill gold">{html_lib.escape(str(st.session_state.get('name', 'Account')))}</span>
+      <span class="tv-pill gold">{html_lib.escape(str(st.session_state.get('name', 'Account')))}</span>{plan_badge_html}
     </div>
   </div>
 </div>
@@ -2293,11 +2396,49 @@ with tab_watchlist:
         on_change=_persist_watchlist,
         help="Edit this to any tickers you want compared. Saved automatically so it's here next time you open the app.",
     )
+    _cap = entitlements.limit(current_plan, "watchlist_tickers")
+    _count = len([t for t in st.session_state.watchlist_text.split(",") if t.strip()])
+    if _cap != entitlements.UNLIMITED:
+        st.caption(
+            f"{_count} tickers saved · your plan scans {int(_cap)} per run. "
+            "Nothing is deleted above that — only the scan is limited."
+        )
+
     scan_button = st.button("Scan watchlist", type="primary")
     if scan_button:
         save_watchlist(st.session_state.watchlist_text)
 
 with tab_settings:
+    st.subheader("Your plan")
+    _pcol1, _pcol2 = st.columns([1, 2])
+    with _pcol1:
+        st.metric("Current plan", plan_info["label"], help=plan_info["price_note"])
+        _left = entitlements.days_remaining(user_record)
+        if plan_info["is_pro"] and _left is not None:
+            st.caption(f"{_left} days remaining.")
+    with _pcol2:
+        if plan_info["is_pro"]:
+            st.success("Everything is unlocked. Thanks for supporting the project.")
+        else:
+            _rows = "".join(
+                f"<li><b>{html_lib.escape(entitlements.FEATURE_COPY[k][0])}</b> — "
+                f"{html_lib.escape(entitlements.FEATURE_COPY[k][1])}</li>"
+                for k in entitlements.PLANS[entitlements.PRO]["limits"]
+                if k in entitlements.FEATURE_COPY
+            )
+            st.markdown(
+                f'<div class="tv-locked"><div class="tv-locked-tag">Pro</div>'
+                f'<div class="tv-locked-body"><b>{html_lib.escape(entitlements.PLANS["pro"]["price_note"])}</b>'
+                f'<span><ul style="margin:0.4rem 0 0 1rem;padding:0;">{_rows}</ul></span>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Checkout isn't wired up yet — the plan column exists and is enforced, "
+                "but there is no way to pay for it from here so far."
+            )
+
+    st.divider()
     st.subheader("Telegram alerts")
     if "telegram_creds_loaded" not in st.session_state:
         _saved_tg = load_saved_telegram()
@@ -2305,8 +2446,12 @@ with tab_settings:
         st.session_state.telegram_chat_id = _saved_tg["chat_id"]
         st.session_state.telegram_creds_loaded = True
 
+    if not plan_allows("telegram_alerts"):
+        upgrade_prompt("telegram_alerts")
+
     telegram_enabled = st.checkbox(
         "Enable",
+        disabled=not plan_allows("telegram_alerts"),
         help="Sends a neutral tilt update to a Telegram bot you control — not automatic 24/7 monitoring (see note below).",
     )
 
@@ -4097,6 +4242,20 @@ with tab_journal:
     journal_entries = load_journal()
     prefill = st.session_state.get("journal_prefill", {})
 
+    # The cap is on ADDING, never on reading. Existing entries stay visible
+    # and editable at any plan — a journal of real trades that vanishes
+    # because a card expired would be indefensible.
+    _journal_cap = entitlements.limit(current_plan, "journal_entries")
+    _journal_full = not entitlements.within_limit(
+        current_plan, "journal_entries", len(journal_entries) + 1)
+    if _journal_cap != entitlements.UNLIMITED:
+        st.caption(
+            f"{len(journal_entries)} of {int(_journal_cap)} entries used on your plan. "
+            "Existing entries always stay readable."
+        )
+    if _journal_full:
+        upgrade_prompt("journal_entries")
+
     with st.expander("Add a trade", expanded=bool(prefill)):
         with st.form("add_journal_entry"):
             jcol1, jcol2 = st.columns(2)
@@ -4119,10 +4278,15 @@ with tab_journal:
                                                  value=float(prefill.get("take_profit", 0.0)))
             j_date_opened = st.date_input("Date opened", value=datetime.now().date())
             j_notes = st.text_area("Notes (optional)", placeholder="Why you took this trade, what you were watching for, etc.")
-            add_submitted = st.form_submit_button("Add to journal")
+            add_submitted = st.form_submit_button("Add to journal", disabled=_journal_full)
 
         if add_submitted:
-            if not j_ticker or j_entry_price <= 0 or j_stop_loss <= 0 or j_shares <= 0:
+            if _journal_full:
+                st.error(
+                    f"Your plan holds {int(_journal_cap)} journal entries. Close or delete one, "
+                    "or upgrade to keep an unlimited record."
+                )
+            elif not j_ticker or j_entry_price <= 0 or j_stop_loss <= 0 or j_shares <= 0:
                 st.error("Ticker, entry price, stop loss, and shares are all required.")
             else:
                 journal_entries.append({
@@ -4199,6 +4363,19 @@ with tab_journal:
         closed_df = pd.DataFrame(closed_rows).sort_values("Closed", ascending=False).reset_index(drop=True)
         st.dataframe(closed_df, hide_index=True, use_container_width=True)
 
+        # Export is Pro, but the table above is not — the record stays fully
+        # visible on any plan, and only the convenience of taking it elsewhere
+        # in one click is paid for.
+        if plan_allows("journal_export"):
+            st.download_button(
+                "Download as CSV",
+                data=closed_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"tickveil_journal_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+            )
+        else:
+            upgrade_prompt("journal_export", inline=True)
+
         st.divider()
         st.subheader("Your honest numbers")
         wins = [r for r in closed_rows if r["P/L $"] > 0]
@@ -4237,7 +4414,10 @@ with tab_digest:
         "app can do by itself."
     )
 
-    if st.button("🌅 Generate digest", type="primary"):
+    if not plan_allows("daily_digest"):
+        upgrade_prompt("daily_digest")
+
+    if st.button("Generate digest", type="primary", disabled=not plan_allows("daily_digest")):
         watchlist_tickers = [t.strip().upper() for t in load_saved_watchlist().split(",") if t.strip()]
         with st.spinner(f"Checking {len(watchlist_tickers)} tickers, your journal, and upcoming earnings..."):
             st.session_state["last_digest"] = generate_daily_digest(watchlist_tickers)
@@ -4294,6 +4474,9 @@ with tab_multiasset:
         "Depth and history can be thinner for these than for large-cap stocks."
     )
 
+    if not plan_allows("multi_asset"):
+        upgrade_prompt("multi_asset")
+
     MULTI_ASSET_SYMBOLS = {
         "Forex": {
             "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "USDJPY=X",
@@ -4324,7 +4507,7 @@ with tab_multiasset:
     else:
         ma_ticker = MULTI_ASSET_SYMBOLS[ma_asset_class][ma_symbol_choice]
 
-    ma_run = st.button("Load", key="multiasset_run")
+    ma_run = st.button("Load", key="multiasset_run", disabled=not plan_allows("multi_asset"))
 
     if ma_run and ma_ticker:
         try:
@@ -5255,10 +5438,20 @@ with tab_watchlist:
     )
 
     if scan_button:
-        tickers_to_scan = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
+        _requested = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
+        # The saved list is never trimmed — only what gets scanned. Someone on
+        # a lapsed plan keeps all forty tickers and gets them all back the
+        # moment they resubscribe.
+        tickers_to_scan, _held_back = entitlements.cap_list(
+            current_plan, "watchlist_tickers", _requested)
         if not tickers_to_scan:
             st.warning("Add at least one ticker to scan.")
         else:
+            if _held_back:
+                st.info(
+                    f"Scanning the first {len(tickers_to_scan)} of your {len(_requested)} tickers. "
+                    f"The other {_held_back} are saved and untouched — Pro scans the whole list."
+                )
             with st.spinner(f"Scanning {len(tickers_to_scan)} tickers..."):
                 results_df = scan_watchlist(tickers_to_scan)
 
