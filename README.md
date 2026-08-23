@@ -27,7 +27,7 @@ python test_security.py
 python test_ordering.py
 python test_storage.py                      # JSON backend
 python test_scoring.py
-python test_entitlements.py
+python test_support.py
 TEST_DATABASE_URL=postgresql://... python test_storage.py   # both backends
 ```
 
@@ -44,10 +44,11 @@ The app cannot tell the two apart — `test_storage.py` runs the same assertions
 against both, because a behaviour that holds for files but not for Postgres is
 a bug that would only surface in production.
 
-**Use Postgres for any deployment that takes payment.** A container filesystem
+**Use Postgres for any deployment with real users.** A container filesystem
 does not survive a redeploy; Streamlit Community Cloud makes no guarantee about
-`user_data/`. Losing a subscriber's trade journal is not a recoverable mistake.
-Supabase and Neon both have free tiers well beyond what this needs. Set:
+`user_data/`. Losing someone's trade journal is not a recoverable mistake,
+whether or not they paid for it. Supabase and Neon both have free tiers well
+beyond what this needs. Set:
 
 ```bash
 export DATABASE_URL='postgresql://user:pass@host:5432/dbname'
@@ -58,8 +59,10 @@ accounts and documents into Postgres automatically, then leaves them alone.
 The migration is idempotent — accounts already in the database are skipped, so
 it never clobbers newer data with a stale file.
 
-Schema: `users` (one row per account, including the `plan`, `plan_expires` and
-`stripe_customer_id` columns the subscription work will read) and
+Schema: `users` (one row per account; the `plan`, `plan_expires` and
+`stripe_customer_id` columns are unused now the app is free, and are left in
+place because dropping columns is the kind of migration worth avoiding until
+there is a reason) and
 `user_documents` (one JSONB blob per account per kind — watchlist, journal,
 Telegram credentials, digest snapshot). Documents are opaque to the database,
 so changing what a journal entry contains needs no schema migration.
@@ -77,10 +80,10 @@ written `0600`, with the mode set at creation rather than chmod-ed afterwards.
 | `test_ordering.py` | Guards the call-before-definition bug class described below. |
 | `test_storage.py` | Same contract asserted against both storage backends, plus the migration. |
 | `test_scoring.py` | Mathematical properties of the composite score, including p-value calibration. |
-| `test_entitlements.py` | Plan resolution and limits — every unknown input must fail closed to free. |
+| `test_support.py` | Donation-link validation: https only, host-pinned, injection-proof. |
 | `storage.py` | Persistence. JSON files or Postgres, chosen by `DATABASE_URL`. |
 | `scoring.py` | The composite score. No Streamlit import, so the maths is testable directly. |
-| `entitlements.py` | Plans and feature limits. No payment logic, no Streamlit import. |
+| `support.py` | Donation links. Validates and host-pins them; handles no money itself. |
 | `.streamlit/config.toml` | Base theme (dark, champagne primary). |
 | `requirements.txt` | Dependencies. |
 
@@ -161,48 +164,80 @@ never BUY or SELL. A score built from four correlated technical indicators over
 a six-month window is nowhere near strong enough evidence to issue an
 instruction, and the rest of the app does not issue them either.
 
-## Plans
+## Donations
 
-`entitlements.py` answers one question: given an account record, what is this
-person allowed to do right now? It holds no payment logic and imports no
-Streamlit.
+Tickveil is free. Every feature, for everyone, with nothing held back — the
+Support tab asks plainly instead, which is more honest than degrading the free
+product until people pay to undo it.
 
-**The free tier keeps the whole analytical product** — any ticker, the full
-technical read, the composite score with its backtest, explain mode, news,
-fundamentals. Paywalling the analysis would gut the thing worth using and kill
-the funnel at the same time. What Pro buys is persistence, automation and
-volume: a bigger watchlist, an unlimited journal, CSV export, Telegram alerts,
-the daily digest, multi-asset. Those are the parts that cost real money to
-provide, which is what makes the price an exchange rather than a toll.
+### The security model, in one line
 
-| | Free | Pro — $5/mo or $45/yr |
+**No payment detail ever touches this app.** There is no payment form, no card
+field, no payment API key, and no money-handling code anywhere in the
+repository. Every button on the Support tab is an outbound link to a checkout
+page hosted by the provider on their own domain.
+
+That is not laziness, it is the correct architecture. Taking card numbers
+yourself means PCI-DSS obligations, cardholder data in your logs and backups,
+fraud screening and chargeback handling. Linking out means the card is entered
+on Ko-fi's or Stripe's page, the compliance burden collapses to the lightest
+tier that exists, and a total compromise of this app leaks no payment data
+because it never had any.
+
+### Setting it up
+
+Create an account with one or more providers, then set the matching variable.
+Anything left unset simply doesn't appear.
+
+| Variable | Provider | Their cut |
 | --- | --- | --- |
-| Analysis, composite score, explain mode | full | full |
-| Watchlist scan | 5 tickers per run | unlimited |
-| Journal entries | 10 | unlimited |
-| Journal CSV export | — | yes |
-| Telegram alerts, daily digest, multi-asset | — | yes |
+| `SUPPORT_KOFI_URL` | Ko-fi | 0% on donations (payment processor fees still apply) |
+| `SUPPORT_GITHUB_SPONSORS_URL` | GitHub Sponsors | 0% |
+| `SUPPORT_STRIPE_URL` | Stripe Payment Link | ~2.9% + 30¢ |
+| `SUPPORT_BMC_URL` | Buy Me a Coffee | ~5% |
+| `SUPPORT_PAYPAL_URL` | PayPal.me | ~3.5% |
 
-Two rules the tests enforce:
+```bash
+export SUPPORT_KOFI_URL='https://ko-fi.com/yourname'
+```
 
-**Everything unrecognised fails closed to free.** An unknown plan name, a
-malformed expiry, a missing record — all resolve to free. The failure mode of
-a permissive default is giving away the product; the failure mode of a strict
-default is a support email.
+On Streamlit Cloud, put the same keys in **Settings → Secrets** instead.
 
-**A lapsed plan degrades the view, never the data.** A 40-ticker watchlist
-stays 40 tickers; the scan processes the first 5 and says so plainly. Journal
-entries beyond the cap stay readable and editable — only *adding* is blocked.
-Resubscribing restores everything instantly because nothing was ever removed.
-Deleting a lapsed customer's trade journal to enforce a limit is
-unforgivable, and it guarantees they never come back.
+### Why the links are host-pinned
 
-Plans resolve at read time rather than via a nightly sweep, so a subscription
-that lapsed an hour ago takes effect now — which matters, because on this
-stack there is no background worker to run that sweep.
+Each URL is checked against an allowlist of hostnames *and* required to be
+`https`. Configuration arrives from environment variables and secrets files —
+exactly where an attacker with partial access would try to redirect money from.
+Pinning means a tampered value fails closed and the button never renders,
+rather than quietly sending supporters to someone else's account.
 
-Checkout is not wired up. The `plan` column exists and is enforced end to end;
-there is no way to pay for it from inside the app yet.
+`test_support.py` covers the spoofing attempts that matter:
+`ko-fi.com.evil.tld`, `evilko-fi.com`, `ko-fi.evil.com`,
+`https://user@evil.com`, `https://evil.com#ko-fi.com`, plain `http`, and any
+URL carrying quotes or whitespace that could break out of the rendered
+attribute. All of them produce no button.
+
+Links also carry `rel="noopener noreferrer nofollow"` and open in a new tab, so
+the destination page gets no handle on the opener window and no referrer.
+
+### Protecting the receiving account
+
+The app's security is the easy half. The account taking the money is the part
+worth hardening:
+
+- **A dedicated email address** for the payment account, not the one on your
+  public profile or in the repo.
+- **A unique password and app-based 2FA.** TOTP or a hardware key — not SMS,
+  which is defeated by SIM-swapping and is the usual route into payment
+  accounts.
+- **Never accept payment details by email or DM.** Nobody legitimate needs to
+  send you a card number, and anyone who offers is running a scam.
+- **Expect phishing** styled as your provider. Log in by typing the address,
+  never from a link in an email about your payouts.
+- **Keep the canonical link in one place** — this repository — so supporters
+  can verify where a link they were sent should actually go.
+- **Never commit a payment API key.** This repo has already had one
+  credentials-in-git incident; see the Security section.
 
 ## Navigation
 

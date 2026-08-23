@@ -17,7 +17,7 @@ from contextlib import contextmanager
 import bcrypt
 import storage
 import scoring
-import entitlements
+import support
 import pyotp
 import qrcode
 import html as html_lib
@@ -1339,59 +1339,49 @@ hr, [data-testid="stDivider"] hr {
 .tv-tick-chg.neg { color: var(--rose); }
 
 /* ==================================================================
-   LOCKED FEATURE — the Pro panel
+   SUPPORT BUTTONS
 
-   Styled as information, not as an obstacle: same glass as every other
-   card, a small tag rather than a padlock, no red. Someone hitting this
-   should read it as "here is something else this does", not as a wall.
+   Cards rather than a row of coloured platform badges. Each one carries
+   what the platform is and what cut it takes, because a donation page
+   that hides the fee is being slightly dishonest with the person paying.
+
+   Styled as an invitation, not a demand: same glass as every other card,
+   champagne hairline on hover, no pulsing, no colour shouting. This page
+   is reachable from the tab rail and nowhere else — no modal, no banner,
+   nothing that interrupts someone trying to read a chart.
    ================================================================== */
-.tv-locked {
+.tv-support-btn {
     display: flex;
-    align-items: flex-start;
-    gap: 0.85rem;
-    padding: 1rem 1.15rem;
-    margin: 0.5rem 0 1rem;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding: 1.05rem 1.15rem;
     border-radius: var(--radius-sm);
     border: 1px solid var(--line);
-    border-left: 2px solid var(--gold-500);
-    background: linear-gradient(120deg, rgba(212,176,120,0.07), rgba(255,255,255,0.015));
-    backdrop-filter: blur(10px);
-    animation: fade-slide 0.45s var(--ease) both;
+    background: linear-gradient(155deg, rgba(255,255,255,0.05), rgba(255,255,255,0.014));
+    text-decoration: none !important;
+    transition: transform 0.4s var(--ease), border-color 0.4s var(--ease),
+                box-shadow 0.4s var(--ease), background 0.4s var(--ease);
+    height: 100%;
 }
-.tv-locked.inline { padding: 0.6rem 0.8rem; margin: 0.3rem 0 0.6rem; }
-.tv-locked-tag {
-    flex: 0 0 auto;
-    font-family: var(--font-ui);
-    font-size: 0.55rem;
-    font-weight: 700;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    color: #0A0C11;
-    background: var(--gold-grad);
-    border-radius: 5px;
-    padding: 0.18rem 0.42rem;
-    margin-top: 0.15rem;
+.tv-support-btn:hover {
+    transform: translateY(-3px);
+    border-color: var(--line-gold);
+    background: linear-gradient(155deg, rgba(212,176,120,0.10), rgba(255,255,255,0.02));
+    box-shadow: var(--shadow-md);
+    text-decoration: none !important;
 }
-.tv-locked-body { display: flex; flex-direction: column; gap: 0.2rem; }
-.tv-locked-body b {
+.tv-support-label {
     font-family: var(--font-ui);
-    font-size: 0.86rem;
+    font-size: 0.95rem;
     font-weight: 600;
-    color: var(--text-100);
+    color: var(--gold-300);
+    letter-spacing: 0.01em;
 }
-.tv-locked-body span {
+.tv-support-blurb {
     font-family: var(--font-ui);
-    font-size: 0.8rem;
+    font-size: 0.76rem;
+    line-height: 1.5;
     color: var(--text-300);
-    line-height: 1.55;
-}
-
-/* Plan badge in the masthead */
-.tv-pill.plan-pro {
-    border-color: rgba(212,176,120,0.5);
-    background: var(--gold-grad);
-    color: #0A0C11;
-    font-weight: 700;
 }
 
 /* ==================================================================
@@ -1914,40 +1904,6 @@ if user_record is None:
     st.rerun()
 totp_enabled = user_record.get("totp_enabled", False)
 
-# ----------------------------------------------------------------------
-# PLAN
-#
-# Resolved from the account record on every run rather than cached, because
-# a subscription that lapsed an hour ago must take effect now. There is no
-# background worker on this stack to sweep expired plans, so read time is
-# the only moment the check can reliably happen.
-# ----------------------------------------------------------------------
-current_plan = entitlements.resolve_plan(user_record)
-plan_info = entitlements.describe(current_plan)
-
-
-def plan_allows(feature: str) -> bool:
-    return entitlements.allows(current_plan, feature)
-
-
-def upgrade_prompt(feature: str, *, inline: bool = False) -> None:
-    """
-    Renders the locked state for one feature.
-
-    Says what the feature does rather than scolding about the plan — someone
-    who has just discovered a capability should learn what it is in the same
-    breath as learning it is paid. No countdown, no interstitial, no
-    dark-pattern nagging: one calm panel that stays out of the way.
-    """
-    title, detail = entitlements.FEATURE_COPY.get(
-        feature, ("Pro feature", "Available on the Pro plan."))
-    st.markdown(
-        f'<div class="tv-locked{" inline" if inline else ""}">'
-        f'<div class="tv-locked-tag">Pro</div>'
-        f'<div class="tv-locked-body"><b>{html_lib.escape(title)}</b>'
-        f'<span>{html_lib.escape(detail)}</span></div></div>',
-        unsafe_allow_html=True,
-    )
 
 
 if totp_enabled and not st.session_state.get(f"totp_verified_{username}", False):
@@ -2104,16 +2060,6 @@ def render_market_tape() -> None:
     st.markdown(f'<div class="tv-tapebar">{"".join(cells)}</div>', unsafe_allow_html=True)
 
 
-# Pro accounts get a badge; free accounts get nothing rather than a "FREE"
-# label, which would read as a nag on every screen.
-#
-# It is interpolated on the SAME LINE as the span before it, deliberately. On
-# its own line an empty badge leaves a blank line inside the masthead's HTML,
-# and markdown ends an HTML block at the first blank line — which dumped the
-# remaining closing tags onto the page as visible "</div>" text.
-plan_badge_html = ('<span class="tv-pill plan-pro">Pro</span>'
-                   if plan_info["is_pro"] else "")
-
 st.markdown('<div id="tv-top"></div>', unsafe_allow_html=True)
 st.markdown(
     f"""
@@ -2128,7 +2074,7 @@ st.markdown(
     <div class="tv-statusrow">
       <span class="tv-pill"><span class="tv-dot"></span>Delayed feed</span>
       <span class="tv-pill">{datetime.now().strftime('%d %b %Y · %H:%M')}</span>
-      <span class="tv-pill gold">{html_lib.escape(str(st.session_state.get('name', 'Account')))}</span>{plan_badge_html}
+      <span class="tv-pill gold">{html_lib.escape(str(st.session_state.get('name', 'Account')))}</span>
     </div>
   </div>
 </div>
@@ -2374,10 +2320,10 @@ current_ticker = (st.session_state.get("analysis_run") or {}).get("ticker", "")
 # actually being read.
 (tab_analysis, tab_fundamentals, tab_factors,
  tab_tradesetup, tab_journal, tab_watchlist, tab_digest,
- tab_multiasset, tab_calendar, tab_settings) = st.tabs(
+ tab_multiasset, tab_calendar, tab_settings, tab_support) = st.tabs(
     ["Analysis", "Fundamentals", "Factor Score",
-     "Trade Setup", "Journal", "Watchlist", "Daily Digest",
-     "Multi-Asset", "Calendar", "Settings"]
+     "Trade Setup", "Journal", "Watchlist", "Digest",
+     "Multi-Asset", "Calendar", "Settings", "Support"]
 )
 
 with tab_watchlist:
@@ -2396,49 +2342,11 @@ with tab_watchlist:
         on_change=_persist_watchlist,
         help="Edit this to any tickers you want compared. Saved automatically so it's here next time you open the app.",
     )
-    _cap = entitlements.limit(current_plan, "watchlist_tickers")
-    _count = len([t for t in st.session_state.watchlist_text.split(",") if t.strip()])
-    if _cap != entitlements.UNLIMITED:
-        st.caption(
-            f"{_count} tickers saved · your plan scans {int(_cap)} per run. "
-            "Nothing is deleted above that — only the scan is limited."
-        )
-
     scan_button = st.button("Scan watchlist", type="primary")
     if scan_button:
         save_watchlist(st.session_state.watchlist_text)
 
 with tab_settings:
-    st.subheader("Your plan")
-    _pcol1, _pcol2 = st.columns([1, 2])
-    with _pcol1:
-        st.metric("Current plan", plan_info["label"], help=plan_info["price_note"])
-        _left = entitlements.days_remaining(user_record)
-        if plan_info["is_pro"] and _left is not None:
-            st.caption(f"{_left} days remaining.")
-    with _pcol2:
-        if plan_info["is_pro"]:
-            st.success("Everything is unlocked. Thanks for supporting the project.")
-        else:
-            _rows = "".join(
-                f"<li><b>{html_lib.escape(entitlements.FEATURE_COPY[k][0])}</b> — "
-                f"{html_lib.escape(entitlements.FEATURE_COPY[k][1])}</li>"
-                for k in entitlements.PLANS[entitlements.PRO]["limits"]
-                if k in entitlements.FEATURE_COPY
-            )
-            st.markdown(
-                f'<div class="tv-locked"><div class="tv-locked-tag">Pro</div>'
-                f'<div class="tv-locked-body"><b>{html_lib.escape(entitlements.PLANS["pro"]["price_note"])}</b>'
-                f'<span><ul style="margin:0.4rem 0 0 1rem;padding:0;">{_rows}</ul></span>'
-                f'</div></div>',
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                "Checkout isn't wired up yet — the plan column exists and is enforced, "
-                "but there is no way to pay for it from here so far."
-            )
-
-    st.divider()
     st.subheader("Telegram alerts")
     if "telegram_creds_loaded" not in st.session_state:
         _saved_tg = load_saved_telegram()
@@ -2446,12 +2354,8 @@ with tab_settings:
         st.session_state.telegram_chat_id = _saved_tg["chat_id"]
         st.session_state.telegram_creds_loaded = True
 
-    if not plan_allows("telegram_alerts"):
-        upgrade_prompt("telegram_alerts")
-
     telegram_enabled = st.checkbox(
         "Enable",
-        disabled=not plan_allows("telegram_alerts"),
         help="Sends a neutral tilt update to a Telegram bot you control — not automatic 24/7 monitoring (see note below).",
     )
 
@@ -4242,20 +4146,6 @@ with tab_journal:
     journal_entries = load_journal()
     prefill = st.session_state.get("journal_prefill", {})
 
-    # The cap is on ADDING, never on reading. Existing entries stay visible
-    # and editable at any plan — a journal of real trades that vanishes
-    # because a card expired would be indefensible.
-    _journal_cap = entitlements.limit(current_plan, "journal_entries")
-    _journal_full = not entitlements.within_limit(
-        current_plan, "journal_entries", len(journal_entries) + 1)
-    if _journal_cap != entitlements.UNLIMITED:
-        st.caption(
-            f"{len(journal_entries)} of {int(_journal_cap)} entries used on your plan. "
-            "Existing entries always stay readable."
-        )
-    if _journal_full:
-        upgrade_prompt("journal_entries")
-
     with st.expander("Add a trade", expanded=bool(prefill)):
         with st.form("add_journal_entry"):
             jcol1, jcol2 = st.columns(2)
@@ -4278,15 +4168,10 @@ with tab_journal:
                                                  value=float(prefill.get("take_profit", 0.0)))
             j_date_opened = st.date_input("Date opened", value=datetime.now().date())
             j_notes = st.text_area("Notes (optional)", placeholder="Why you took this trade, what you were watching for, etc.")
-            add_submitted = st.form_submit_button("Add to journal", disabled=_journal_full)
+            add_submitted = st.form_submit_button("Add to journal")
 
         if add_submitted:
-            if _journal_full:
-                st.error(
-                    f"Your plan holds {int(_journal_cap)} journal entries. Close or delete one, "
-                    "or upgrade to keep an unlimited record."
-                )
-            elif not j_ticker or j_entry_price <= 0 or j_stop_loss <= 0 or j_shares <= 0:
+            if not j_ticker or j_entry_price <= 0 or j_stop_loss <= 0 or j_shares <= 0:
                 st.error("Ticker, entry price, stop loss, and shares are all required.")
             else:
                 journal_entries.append({
@@ -4363,18 +4248,12 @@ with tab_journal:
         closed_df = pd.DataFrame(closed_rows).sort_values("Closed", ascending=False).reset_index(drop=True)
         st.dataframe(closed_df, hide_index=True, use_container_width=True)
 
-        # Export is Pro, but the table above is not — the record stays fully
-        # visible on any plan, and only the convenience of taking it elsewhere
-        # in one click is paid for.
-        if plan_allows("journal_export"):
-            st.download_button(
-                "Download as CSV",
-                data=closed_df.to_csv(index=False).encode("utf-8"),
-                file_name=f"tickveil_journal_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv",
-            )
-        else:
-            upgrade_prompt("journal_export", inline=True)
+        st.download_button(
+            "Download as CSV",
+            data=closed_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"tickveil_journal_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+        )
 
         st.divider()
         st.subheader("Your honest numbers")
@@ -4414,10 +4293,7 @@ with tab_digest:
         "app can do by itself."
     )
 
-    if not plan_allows("daily_digest"):
-        upgrade_prompt("daily_digest")
-
-    if st.button("Generate digest", type="primary", disabled=not plan_allows("daily_digest")):
+    if st.button("Generate digest", type="primary"):
         watchlist_tickers = [t.strip().upper() for t in load_saved_watchlist().split(",") if t.strip()]
         with st.spinner(f"Checking {len(watchlist_tickers)} tickers, your journal, and upcoming earnings..."):
             st.session_state["last_digest"] = generate_daily_digest(watchlist_tickers)
@@ -4474,9 +4350,6 @@ with tab_multiasset:
         "Depth and history can be thinner for these than for large-cap stocks."
     )
 
-    if not plan_allows("multi_asset"):
-        upgrade_prompt("multi_asset")
-
     MULTI_ASSET_SYMBOLS = {
         "Forex": {
             "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "USDJPY=X",
@@ -4507,7 +4380,7 @@ with tab_multiasset:
     else:
         ma_ticker = MULTI_ASSET_SYMBOLS[ma_asset_class][ma_symbol_choice]
 
-    ma_run = st.button("Load", key="multiasset_run", disabled=not plan_allows("multi_asset"))
+    ma_run = st.button("Load", key="multiasset_run")
 
     if ma_run and ma_ticker:
         try:
@@ -5438,20 +5311,10 @@ with tab_watchlist:
     )
 
     if scan_button:
-        _requested = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
-        # The saved list is never trimmed — only what gets scanned. Someone on
-        # a lapsed plan keeps all forty tickers and gets them all back the
-        # moment they resubscribe.
-        tickers_to_scan, _held_back = entitlements.cap_list(
-            current_plan, "watchlist_tickers", _requested)
+        tickers_to_scan = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
         if not tickers_to_scan:
             st.warning("Add at least one ticker to scan.")
         else:
-            if _held_back:
-                st.info(
-                    f"Scanning the first {len(tickers_to_scan)} of your {len(_requested)} tickers. "
-                    f"The other {_held_back} are saved and untouched — Pro scans the whole list."
-                )
             with st.spinner(f"Scanning {len(tickers_to_scan)} tickers..."):
                 results_df = scan_watchlist(tickers_to_scan)
 
@@ -5620,6 +5483,83 @@ with tab_analysis:
                 st.markdown(f"{badge} **[{_t}]({item['link']})**" if item["link"] else f"{badge} **{_t}**")
                 if item["description"]:
                     st.caption(item["description"])
+
+
+
+with tab_support:
+    # ----------------------------------------------------------------------
+    # SUPPORT
+    #
+    # Tickveil is free and stays free. This page exists because running it
+    # costs money — a database, a host that doesn't sleep, eventually a
+    # licensed market-data feed — and asking plainly is more honest than
+    # quietly degrading the free product until people pay to undo it.
+    #
+    # No payment detail is ever collected here. Every button is an outbound
+    # link to a hosted checkout on the provider's own domain. The card never
+    # touches this app, this server, or this database.
+    # ----------------------------------------------------------------------
+    st.subheader("Support Tickveil")
+
+    _links = support.configured_links()
+
+    st.markdown(
+        "Everything in this app is free, and there is no paid tier waiting "
+        "behind a wall. If it has been useful and you'd like to put something "
+        "toward the running costs, the links below go straight to a hosted "
+        "checkout — no account needed, any amount, one-off."
+    )
+
+    if _links:
+        _cols = st.columns(min(len(_links), 3))
+        for _idx, _link in enumerate(_links):
+            with _cols[_idx % len(_cols)]:
+                st.markdown(
+                    f'<a class="tv-support-btn" href="{_link["url"]}" '
+                    f'target="_blank" rel="noopener noreferrer nofollow">'
+                    f'<span class="tv-support-label">{html_lib.escape(_link["label"])}</span>'
+                    f'<span class="tv-support-blurb">{html_lib.escape(_link["blurb"])}</span>'
+                    f'</a>',
+                    unsafe_allow_html=True,
+                )
+
+        st.caption(
+            "These open on the provider's own site. Tickveil never sees or stores "
+            "card details — there is no payment form anywhere in this app, by design."
+        )
+    else:
+        st.info(
+            "No donation links are configured on this deployment. Whoever is running "
+            "this copy can add them by setting the SUPPORT_* values described in the "
+            "README — until then this page stays empty rather than showing dead buttons."
+        )
+
+    st.divider()
+
+    st.markdown("**What the money actually goes to**")
+    st.markdown("""
+- **Hosting** — roughly \\$5–7 a month for a server that doesn't fall asleep between visits.
+- **Database** — currently free tier; a paid one becomes necessary if this gets busy.
+- **Market data** — the long-term one. The free feed is fine for an educational tool but
+  is not licensed for commercial use, so a proper data licence is what a serious version
+  of this needs.
+
+Nothing is gated behind donations and nothing will be. If that changes, it will be said
+here first rather than discovered.
+""")
+
+    st.divider()
+    st.markdown("**Other ways to help, none of which cost anything**")
+    st.markdown("""
+- Tell me what broke. A precise bug report is worth more than a coffee.
+- Tell me which number confused you — that is the part of this app I most want to get right.
+- Star the repository, or send it to someone learning to read a chart.
+""")
+
+    st.caption(
+        "Donations are a gift toward running costs. They buy no feature, no support "
+        "commitment, and no advice — this is an educational tool, not a financial service."
+    )
 
 
 # ----------------------------------------------------------------------
