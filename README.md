@@ -1,13 +1,13 @@
 # Tickveil
 
 A market-analysis terminal built in Streamlit: price data and technical
-indicators, fundamentals and risk, a transparent four-factor score, a trade
-planner, a journal, watchlist scanning and news sentiment — with the method
-behind every number shown alongside it.
+indicators, fundamentals and risk, a transparent composite score with its own
+honest backtest, a trade planner, a journal, watchlist scanning and news
+sentiment — with the method behind every number shown alongside it.
 
 Nothing in the app predicts prices or recommends trades. That constraint is
 deliberate and it is enforced in the copy throughout: the indicator lean is a
-count, the price range is a volatility band, the factor score is a snapshot.
+count, the price range is a volatility band, the composite score is a snapshot.
 Where a number could be mistaken for a forecast, the interface says so.
 
 ## Running it
@@ -26,6 +26,7 @@ Run the checks with:
 python test_security.py
 python test_ordering.py
 python test_storage.py                      # JSON backend
+python test_scoring.py
 TEST_DATABASE_URL=postgresql://... python test_storage.py   # both backends
 ```
 
@@ -74,7 +75,9 @@ written `0600`, with the mode set at creation rather than chmod-ed afterwards.
 | `test_security.py` | Input-handling boundaries: username→path, link schemes, password policy. |
 | `test_ordering.py` | Guards the call-before-definition bug class described below. |
 | `test_storage.py` | Same contract asserted against both storage backends, plus the migration. |
+| `test_scoring.py` | Mathematical properties of the composite score, including p-value calibration. |
 | `storage.py` | Persistence. JSON files or Postgres, chosen by `DATABASE_URL`. |
+| `scoring.py` | The composite score. No Streamlit import, so the maths is testable directly. |
 | `.streamlit/config.toml` | Base theme (dark, champagne primary). |
 | `requirements.txt` | Dependencies. |
 
@@ -103,6 +106,57 @@ professional scans and a strip anyone can read.
 data source and its delay, the ticker currently loaded, whether explain mode
 is on, and the render time. No fake "LIVE" indicator over a 15-minute-delayed
 free feed.
+
+## The composite score
+
+Technical + sentiment, blended, then cut down by a macro risk haircut. It
+replaced an earlier Value/Quality/Momentum/Sentiment model; the underlying
+fundamental data it used is still shown on the Fundamentals tab.
+
+Four statistical decisions carry it, and each fixes something that a
+straightforward implementation gets wrong.
+
+**The composite is re-standardised, so a threshold means one thing.** A
+weighted sum of unit-variance z-scores does not itself have unit variance — it
+has √(wᵀΣw), which moves with how correlated the parts happen to be. Left
+alone, "+0.5" means 1.67σ when the four sub-signals are independent and 1.17σ
+when they are correlated: measured firing rates of 4.7% and 12.0% of days for
+the *same* number. Dividing by the composite's own rolling deviation makes one
+unit one standard deviation for every ticker.
+
+**Weights renormalise over available components.** With no headlines, weighting
+technical at 0.55 and sentiment at 0.45 silently multiplies the reading by 0.55
+— a 45% shrink toward neutral for a component that supplied no information.
+Sentiment returns `None` rather than `0.0` when absent, because "no data" and
+"balanced" are different claims.
+
+**The backtest uses a block bootstrap, not `linregress`.** This is the big one.
+Forward returns computed daily over a 10-day horizon share 9 of their 10 days
+with the next observation, and the score is a 126-day rolling statistic with
+autocorrelation near 0.99. Ordinary OLS inference assumes neither. Measured on
+simulated data containing **no** relationship, at α = 0.05:
+
+| Method | False-positive rate |
+| --- | --- |
+| `stats.linregress` | **51.7%** |
+| Newey–West (lag 9) | 10.7% |
+| Non-overlapping subsample | 5.3% |
+| Circular block bootstrap | 6.3% |
+
+The naive p-value calls pure noise significant about half the time. Both
+numbers are displayed in the UI so the gap between them is visible.
+
+**The macro term is a haircut, not a direction.** VIX (optionally blended with
+an uploaded geopolitical-risk index) multiplies the score's magnitude, reducing
+conviction in both directions rather than only penalising positive readings —
+elevated volatility widens the distribution of everything, which makes any
+signal less informative rather than more bearish. `geo_beta` is the maximum
+haircut and is estimated per stock by regressing its returns on VIX changes.
+
+Bands are named for what the reading *is* — "strongly positive conditions" —
+never BUY or SELL. A score built from four correlated technical indicators over
+a six-month window is nowhere near strong enough evidence to issue an
+instruction, and the rest of the app does not issue them either.
 
 ## Navigation
 

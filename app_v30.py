@@ -16,6 +16,7 @@ import secrets
 from contextlib import contextmanager
 import bcrypt
 import storage
+import scoring
 import pyotp
 import qrcode
 import html as html_lib
@@ -2539,8 +2540,9 @@ def parse_gpr_upload(uploaded_file) -> dict | None:
     Caldara & Iacoviello index, freely downloadable (not a live API) at
     matteoiacoviello.com/gpr.htm. Expects columns 'date' and 'gpr' (or
     close variants); this is explicitly optional and manual since no
-    live free API exists for this data. Same descriptive-only treatment
-    as VIX — no per-stock score, no risk-penalty multiplier.
+    live free API exists for this data. When supplied it is blended 50/50
+    with VIX in the composite's macro haircut; without it the haircut uses
+    VIX alone.
     """
     try:
         df = pd.read_csv(uploaded_file)
@@ -2572,8 +2574,14 @@ def parse_gpr_upload(uploaded_file) -> dict | None:
     else:
         level = "typical"
 
+    # The series itself is returned alongside the summary. Previously only the
+    # summary came back, so an uploaded GPR file was described in a caption and
+    # then had no effect whatsoever on any score — the composite looked for a
+    # series that nothing ever set.
+    series = df.set_index(date_col)[gpr_col].astype(float).rename("GPR")
+
     return {"current": float(current), "six_month_avg": float(avg), "level": level,
-            "as_of": df[date_col].iloc[-1].strftime("%Y-%m-%d")}
+            "as_of": df[date_col].iloc[-1].strftime("%Y-%m-%d"), "series": series}
 
 
 @st.cache_data(ttl=15)  # deliberately short — this is the ONLY thing "live mode" refreshes
@@ -2676,26 +2684,6 @@ def get_fundamentals(ticker_symbol: str) -> dict:
 
 
 @st.cache_data(ttl=3600)
-def get_peer_fundamentals_df(tickers: list[str]) -> pd.DataFrame:
-    """
-    Fetches fundamentals for a list of tickers (normally the user's own
-    Watchlist) to use as the peer/comparison group for Value factor
-    z-scoring. Skips any ticker that fails to load rather than failing
-    the whole batch — a partial peer group is still useful.
-    """
-    rows = []
-    for t in tickers:
-        try:
-            f = dict(get_fundamentals(t))
-            f["ticker"] = t
-            rows.append(f)
-        except Exception:
-            continue
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).set_index("ticker")
-
-
 @st.cache_data(ttl=3600)
 def get_earnings_and_dividends(ticker_symbol: str) -> dict:
     """
@@ -3671,215 +3659,6 @@ def historical_signal_check(daily_df: pd.DataFrame, forward_days: int = 5) -> di
 #      LARGE portfolios over LONG periods, not a guarantee for any single
 #      stock at any single moment.
 # ----------------------------------------------------------------------
-def zscore_to_100(z: float, scale: float = 15.0) -> float:
-    """
-    Maps a z-score (standard deviations from a peer/benchmark average)
-    onto a 0-100 scale centered at 50. With the default scale of 15, one
-    standard deviation of "cheapness" or "outperformance" moves the score
-    15 points, so it saturates at 0/100 by roughly z = ±3.3 — a genuinely
-    rare reading, not a common one.
-    """
-    if z is None or (isinstance(z, float) and np.isnan(z)):
-        return 50.0
-    return float(np.clip(50 + scale * z, 0, 100))
-
-
-# field: (fallback peer-group mean, fallback peer-group std dev, higher_is_cheaper)
-# Fallbacks are rough, commonly-cited broad-market reference points, used
-# ONLY when there aren't enough peer tickers (<3) for a real cross-
-# sectional comparison — clearly labeled as such in the UI, not presented
-# as a rigorous sector-specific "fair value."
-VALUE_METRIC_ANCHORS = {
-    "trailing_pe":        (20.0, 10.0, False),
-    "forward_pe":         (18.0, 8.0, False),
-    "price_to_book":      (3.5, 2.5, False),
-    "peg_ratio":          (2.0, 1.5, False),
-    "ev_to_ebitda":       (13.0, 6.0, False),
-    "price_to_sales":     (3.0, 3.0, False),
-    "dividend_yield_pct": (1.8, 1.5, True),
-}
-VALUE_METRIC_LABELS = {
-    "trailing_pe": "P/E (trailing)",
-    "forward_pe": "P/E (forward)",
-    "price_to_book": "Price / Book",
-    "peg_ratio": "PEG ratio",
-    "ev_to_ebitda": "EV / EBITDA",
-    "price_to_sales": "Price / Sales",
-    "dividend_yield_pct": "Dividend yield %",
-}
-
-
-def compute_value_score(fundamentals: dict, peer_df: pd.DataFrame) -> dict:
-    """
-    Value Composite Score — the same core idea used by quant "value
-    composite" indexes: combine several valuation ratios (P/E, forward
-    P/E, P/B, PEG, EV/EBITDA, P/S, dividend yield) rather than trusting
-    any single one, since any individual multiple can be misleading for
-    a given company (e.g. a low P/E can mean "cheap" OR "the market
-    expects earnings to fall").
-
-    For each available metric: z = (this stock's value - comparison
-    group average) / comparison group std dev. The comparison group is
-    the user's Watchlist (a real cross-sectional peer comparison) when
-    at least 3 peers have that metric; otherwise a fixed broad-market
-    anchor. Ratios where LOWER is cheaper are sign-flipped so a positive
-    z always means "looks cheaper than the comparison group." Dividend
-    yield is not flipped (higher yield is treated as cheaper, generally).
-    The final score is the plain average of every available per-metric
-    score (each mapped 0-100 via zscore_to_100).
-    """
-    rows = []
-    for field, (fallback_mean, fallback_std, higher_is_cheaper) in VALUE_METRIC_ANCHORS.items():
-        value = fundamentals.get(field)
-        if value is None or (isinstance(value, float) and np.isnan(value)):
-            continue
-
-        peer_values = None
-        source = "broad-market anchor (not enough watchlist peers)"
-        if peer_df is not None and not peer_df.empty and field in peer_df.columns:
-            peer_series = pd.to_numeric(peer_df[field], errors="coerce").dropna()
-            if len(peer_series) >= 3:
-                peer_values = peer_series
-                source = f"{len(peer_series)}-ticker watchlist peer group"
-
-        if peer_values is not None:
-            mean, std = float(peer_values.mean()), float(peer_values.std())
-        else:
-            mean, std = fallback_mean, fallback_std
-
-        if not std or pd.isna(std):
-            continue
-
-        z = (value - mean) / std
-        if not higher_is_cheaper:
-            z = -z  # flip so positive z always means "cheaper"
-
-        rows.append({
-            "metric": VALUE_METRIC_LABELS[field],
-            "value": value,
-            "peer_mean": mean,
-            "peer_std": std,
-            "z": z,
-            "score": zscore_to_100(z),
-            "source": source,
-        })
-
-    if not rows:
-        return {"score": None, "rows": [], "note": "No valuation metrics available for this ticker."}
-
-    return {"score": float(np.mean([r["score"] for r in rows])), "rows": rows, "note": None}
-
-
-def compute_quality_score(fundamentals: dict) -> dict:
-    """
-    Quality Composite — inspired by Piotroski's F-Score, a well-documented
-    academic method of scoring financial health with simple pass/fail
-    accounting checks instead of one ratio. This is a lighter, simplified
-    version limited to what yfinance exposes (not full financial-statement
-    line items), so treat it as a cousin of the original, not a
-    reproduction of it. Score = (checks passed) / (checks with data) × 100
-    — a ticker missing some fields is scored on whatever it does have,
-    not silently penalized for the rest.
-    """
-    checks = []
-    roe = fundamentals.get("return_on_equity")
-    if roe is not None:
-        checks.append(("Return on equity is positive", roe > 0))
-    profit_margin = fundamentals.get("profit_margins")
-    if profit_margin is not None:
-        checks.append(("Profit margin is positive", profit_margin > 0))
-    op_margin = fundamentals.get("operating_margins")
-    if op_margin is not None:
-        checks.append(("Operating margin is positive", op_margin > 0))
-    debt_equity = fundamentals.get("debt_to_equity")
-    if debt_equity is not None:
-        checks.append(("Debt/Equity below 100% (conservative leverage)", debt_equity < 100))
-    current_ratio = fundamentals.get("current_ratio")
-    if current_ratio is not None:
-        checks.append(("Current ratio above 1 (covers short-term liabilities)", current_ratio > 1))
-    fcf = fundamentals.get("free_cashflow")
-    if fcf is not None:
-        checks.append(("Free cash flow is positive", fcf > 0))
-    rev_growth = fundamentals.get("revenue_growth")
-    if rev_growth is not None:
-        checks.append(("Revenue grew year-over-year", rev_growth > 0))
-    earnings_growth = fundamentals.get("earnings_growth")
-    if earnings_growth is not None:
-        checks.append(("Earnings grew year-over-year", earnings_growth > 0))
-
-    if not checks:
-        return {"score": None, "checks": [], "note": "No quality/financial-health metrics available for this ticker."}
-
-    passed = sum(1 for _, ok in checks if ok)
-    return {"score": passed / len(checks) * 100, "checks": checks, "note": None}
-
-
-def compute_momentum_score(daily_df: pd.DataFrame, benchmark_df: pd.DataFrame | None, indicator_score: int) -> dict:
-    """
-    Blends two independent, well-documented momentum readings:
-
-    1. "12-1 momentum" — the stock's own return over the past ~12 months,
-       EXCLUDING the most recent month. This is the specific definition
-       from Jegadeesh & Titman (1993), one of the most replicated
-       findings in academic finance. The most recent month is excluded
-       on purpose: very short-term moves tend to partially REVERSE
-       (mean-revert), while the 2-to-12-month window tends to persist.
-       Measured relative to a sector benchmark (or SPY) over the
-       identical window, then converted to a z-score-like reading using
-       a rule-of-thumb ~15 percentage-point "1 standard deviation" of
-       individual-stock dispersion (a reasonable approximation, not a
-       measured value from this specific dataset).
-    2. This app's existing short-term Indicator Lean score (SMA cross,
-       MACD vs. signal, RSI zone) — a faster-moving daily reading.
-
-    The two are averaged when both are available, so this factor blends
-    a slow, historically-validated signal with a fast, transparent one.
-    """
-    technical_score = (indicator_score + 4) / 8 * 100
-    result = {
-        "stock_12_1": None, "benchmark_12_1": None, "relative_12_1": None,
-        "momentum_12_1_score": None, "technical_score": technical_score,
-        "score": technical_score, "lookback_days": None,
-        "note": "Not enough price history (need at least ~6 months) for 12-1 momentum — using the short-term technical score only.",
-    }
-
-    # A plain "1y" daily fetch typically comes back with ~250-252 rows
-    # (trading days per calendar year, after holidays) — just short of a
-    # rigid 253-day requirement, which would make this silently unavailable
-    # almost always. Instead, use as much of the available history as
-    # there is, up to ~253 days, and require only ~6 months (130 trading
-    # days) as a minimum for the reading to be meaningful at all. The
-    # actual window used is reported in "lookback_days" so the UI can be
-    # honest about it when it's short of a full 12 months.
-    MIN_LOOKBACK = 130
-    RECENT_SKIP = 21  # ~1 month, excluded to avoid the short-term reversal effect
-
-    def _12_1_return(closes: pd.Series):
-        n = len(closes)
-        if n < MIN_LOOKBACK + RECENT_SKIP:
-            return None, None
-        anchor_idx = max(0, n - 253)
-        recent_idx = n - 1 - RECENT_SKIP
-        return float(closes.iloc[recent_idx] / closes.iloc[anchor_idx] - 1), recent_idx - anchor_idx
-
-    stock_12_1, stock_lookback = _12_1_return(daily_df["Close"])
-    if stock_12_1 is not None:
-        result["stock_12_1"] = stock_12_1
-        result["lookback_days"] = stock_lookback
-
-        if benchmark_df is not None:
-            benchmark_12_1, _ = _12_1_return(benchmark_df["Close"])
-            if benchmark_12_1 is not None:
-                relative = stock_12_1 - benchmark_12_1
-                result["benchmark_12_1"] = benchmark_12_1
-                result["relative_12_1"] = relative
-                result["momentum_12_1_score"] = zscore_to_100(relative / 0.15)
-                result["score"] = (result["momentum_12_1_score"] + technical_score) / 2
-                result["note"] = None
-
-    return result
-
-
 def _parse_news_timestamp(published: str) -> datetime | None:
     """
     yfinance news timestamps show up as either an ISO string
@@ -3898,98 +3677,6 @@ def _parse_news_timestamp(published: str) -> datetime | None:
         return datetime.utcfromtimestamp(float(published))
     except (ValueError, TypeError):
         return None
-
-
-def compute_news_sentiment_score(news_items: list[dict], half_life_hours: float = 24.0) -> dict:
-    """
-    Recency-weighted sentiment — "instant" news (the last few hours)
-    counts far more than "latest" news from a few days ago, and week-old
-    headlines fade out almost entirely. Each headline's sentiment
-    (+1 / 0 / -1, from this app's finance-aware tag_sentiment) is weighted
-    by 0.5 ^ (age_in_hours / half_life_hours): a headline exactly one
-    half-life old counts for half as much as a brand-new one, two
-    half-lives old a quarter, and so on. Headlines with no parseable
-    timestamp get a neutral 0.5 weight so they still count a little
-    rather than being silently dropped.
-    Score = weighted-average sentiment, rescaled from [-1, 1] to [0, 100].
-    """
-    if not news_items:
-        return {"score": 50.0, "rows": [], "note": "No recent headlines — defaulting to a neutral 50."}
-
-    now = datetime.utcnow()
-    rows = []
-    weighted_sum = 0.0
-    weight_total = 0.0
-
-    for item in news_items:
-        sentiment = tag_sentiment(item["title"] + " " + item.get("description", ""))
-        value = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}[sentiment]
-
-        ts = _parse_news_timestamp(item.get("published", ""))
-        if ts is not None:
-            age_hours = max((now - ts).total_seconds() / 3600, 0)
-            weight = 0.5 ** (age_hours / half_life_hours)
-        else:
-            age_hours = None
-            weight = 0.5
-
-        weighted_sum += value * weight
-        weight_total += weight
-        rows.append({"title": item["title"], "sentiment": sentiment, "age_hours": age_hours, "weight": weight})
-
-    weighted_avg = weighted_sum / weight_total if weight_total > 0 else 0.0
-    return {"score": (weighted_avg + 1) / 2 * 100, "rows": rows, "note": None}
-
-
-DEFAULT_FACTOR_WEIGHTS = {"value": 0.35, "quality": 0.20, "momentum": 0.30, "sentiment": 0.15}
-
-
-def compute_factor_composite(value_result: dict, quality_result: dict,
-                              momentum_result: dict, sentiment_result: dict,
-                              weights: dict) -> dict:
-    """
-    Weighted average of the four factor scores, using only the factors
-    that actually have data — weights are renormalized over whatever's
-    available, so a ticker missing e.g. Quality data isn't silently
-    scored as if it failed that factor.
-    """
-    components = {
-        "value": value_result["score"],
-        "quality": quality_result["score"],
-        "momentum": momentum_result["score"],
-        "sentiment": sentiment_result["score"],
-    }
-    available = {k: v for k, v in components.items() if v is not None}
-    if not available:
-        return {"score": None, "components": components, "used_weights": {}}
-
-    used_weights = {k: weights.get(k, 0) for k in available}
-    weight_sum = sum(used_weights.values())
-    if weight_sum > 0:
-        used_weights = {k: w / weight_sum for k, w in used_weights.items()}
-    else:
-        used_weights = {k: 1 / len(available) for k in available}
-
-    total = sum(available[k] * used_weights[k] for k in available)
-    return {"score": total, "components": components, "used_weights": used_weights}
-
-
-def factor_score_verdict(score: float) -> tuple[str, str]:
-    """
-    Bands the 0-100 composite into a plain-language label. The cut points
-    are round, easy-to-read thresholds chosen for readability — not
-    statistically fit to any outcome.
-    """
-    if score >= 70:
-        return "Strong on these factors", "🟢"
-    elif score >= 55:
-        return "Above-average on these factors", "🟡"
-    elif score >= 45:
-        return "Mixed / neutral on these factors", "⚪"
-    elif score >= 30:
-        return "Below-average on these factors", "🟠"
-    else:
-        return "Weak on these factors", "🔴"
 
 
 # ----------------------------------------------------------------------
@@ -4152,10 +3839,12 @@ def scan_watchlist(tickers: list[str]) -> pd.DataFrame:
     rows = []
     progress = st.progress(0.0, text="Starting scan...")
 
-    # The whole watchlist doubles as its own Value-factor peer group here —
-    # a genuine cross-sectional comparison rather than the broad-market
-    # fallback anchors used when scoring a single ticker in isolation.
-    peer_df = get_peer_fundamentals_df(tickers)
+    # The macro haircut is a market-wide condition, so VIX is fetched once and
+    # applied to every ticker rather than re-downloaded per row.
+    try:
+        scan_vix = load_daily_data("^VIX")["Close"]
+    except Exception:
+        scan_vix = None
 
     for idx, t in enumerate(tickers):
         progress.progress((idx) / max(len(tickers), 1), text=f"Scanning {t}...")
@@ -4175,19 +3864,29 @@ def scan_watchlist(tickers: list[str]) -> pd.DataFrame:
             fundamentals = get_fundamentals(t)
             sector = fundamentals.get("sector") or "Unknown"
 
-            benchmark_ticker = SECTOR_BENCHMARK_MAP.get(sector, "SPY")
-            try:
-                benchmark_df = load_daily_data(benchmark_ticker)
-            except Exception:
-                benchmark_df = None
+            # Same composite the Factor Score tab computes, so the two views
+            # cannot disagree about what a ticker scores.
+            tech_series, _ind = scoring.technical_score(df)
+            tech_now = float(tech_series.iloc[-1]) if pd.notna(tech_series.iloc[-1]) else None
 
-            value_result = compute_value_score(fundamentals, peer_df)
-            quality_result = compute_quality_score(fundamentals)
-            momentum_result = compute_momentum_score(df, benchmark_df, indicator_score)
-            sentiment_result = compute_news_sentiment_score(news)
-            composite = compute_factor_composite(
-                value_result, quality_result, momentum_result, sentiment_result, DEFAULT_FACTOR_WEIGHTS
-            )
+            if scan_vix is not None:
+                haircut = float(scoring.macro_risk_penalty(df.index, scan_vix).iloc[-1])
+            else:
+                haircut = 0.0
+
+            scan_items = []
+            for _n, _tone in zip(news, sentiments):
+                _ts = _parse_news_timestamp(_n.get("published", ""))
+                _age_h = ((datetime.now() - _ts).total_seconds() / 3600.0) if _ts else 24.0
+                scan_items.append({
+                    "sentiment": {"positive": 1.0, "negative": -1.0, "neutral": 0.0}[_tone],
+                    "age_hours": max(_age_h, 0.0),
+                })
+            _sent_info = scoring.decayed_sentiment(scan_items)
+            _sent_sigma = (scoring.sentiment_to_sigma(_sent_info["score"], _sent_info["effective_n"])
+                           if _sent_info else None)
+
+            composite = scoring.combine(tech_now, _sent_sigma, haircut)
 
             rows.append({
                 "Ticker": t,
@@ -4196,7 +3895,8 @@ def scan_watchlist(tickers: list[str]) -> pd.DataFrame:
                 "Indicator lean": lean,
                 "Headlines +/-": f"{n_pos}/{n_neg}",
                 "Combined tilt score": combined_score,
-                "Factor score": round(composite["score"], 1) if composite["score"] is not None else None,
+                "Composite score": round(composite["final"], 2) if composite["final"] is not None else None,
+                "Reading": composite["reading"],
             })
         except Exception:
             continue  # skip tickers that fail to load (bad symbol, no data, etc.)
@@ -4854,13 +4554,16 @@ if _analysis_run:
                     "academic dataset you can download yourself from "
                     "[matteoiacoviello.com/gpr.htm](https://www.matteoiacoviello.com/gpr.htm) "
                     "(needs 'date' and 'gpr' columns) — upload it here if you want that context "
-                    "alongside VIX. Same rule as everywhere else: descriptive only, never folded "
-                    "into any per-stock score."
+                    "alongside VIX. When supplied it is blended 50/50 with VIX in the "
+                    "macro haircut on the Factor Score tab."
                 )
                 gpr_file = st.file_uploader("GPR index CSV", type="csv", key=f"gpr_upload_{ticker}")
                 if gpr_file:
                     gpr_result = parse_gpr_upload(gpr_file)
                     if gpr_result:
+                        # Held in session state so the composite score on the
+                        # Factor Score tab can fold it into the macro haircut.
+                        st.session_state["gpr_series"] = gpr_result["series"]
                         gpr_level_desc = {
                             "elevated": "above its own 6-month average in your file — elevated geopolitical risk per this index",
                             "low": "below its own 6-month average in your file — lower geopolitical risk per this index",
@@ -5206,242 +4909,313 @@ if _analysis_run:
             st.caption(f"Data as of {datetime.now().strftime('%Y-%m-%d %H:%M')}. Not financial advice.")
 
         with tab_factors:
-            st.subheader(f"Factor Score — {ticker}")
+            # ----------------------------------------------------------
+            # COMPOSITE SCORE
+            #
+            # Replaces the previous Value/Quality/Momentum/Sentiment model.
+            # The mathematics lives in scoring.py, which imports no Streamlit
+            # so it can be tested directly — see test_scoring.py.
+            # ----------------------------------------------------------
+            st.subheader(f"Composite score — {ticker}")
             explain(
-                "Four separate lenses on the same company, each scored 0-100 and then blended using the "
-                "weights you set. Value asks whether it is cheap against its peers, Quality whether the "
-                "business is sound, Momentum whether the price trend is strong, and Sentiment how recent "
-                "headlines read. Every sub-score opens up to show its own arithmetic."
-            )
-            st.caption(
-                "A single, transparent 0-100 score built from four independently "
-                "well-documented factor styles: Value, Quality, Momentum, and News "
-                "Sentiment. This is a systematic SCREENING score, not personalized "
-                "investment advice — expand the methodology note and each factor "
-                "breakdown below to see exactly how it's computed, and its caveats."
+                "One number built from three things: where the price sits relative to its own recent "
+                "history, how recent headlines read, and how nervous the wider market is. The first two "
+                "are blended; the third is applied as a confidence haircut rather than a direction. The "
+                "score is measured in standard deviations, so zero is this stock's own normal and +1 "
+                "means one standard deviation above it."
             )
 
             with st.expander("How this score works — read this first"):
                 st.markdown("""
-**The big idea.** Factor investing is the well-documented finding that certain
-measurable stock characteristics — being statistically *cheap* (Value), being
-*financially healthy* (Quality), and having *recent positive price trend*
-(Momentum) — have, **on average, over long periods, across large numbers of
-stocks**, been associated with better subsequent returns than their
-opposites. This is decades of published academic research (Fama & French on
-value, Jegadeesh & Titman on momentum, Piotroski on quality) — not a
-proprietary or made-up model. "On average, over many stocks, over long
-periods" is doing a lot of work in that sentence: it does **not** mean any
-single stock, right now, is guaranteed to behave a certain way. A fourth
-factor, News Sentiment, is layered on top since it's specifically what you
-asked for — it is the least academically validated of the four (closer to
-short-term noise than a proven factor), which is why it gets the smallest
-default weight.
+**The three parts.**
 
-- **Value** — z-scores this stock's P/E, forward P/E, P/B, PEG, EV/EBITDA,
-  P/S, and dividend yield against your Watchlist (used as a peer/comparison
-  group) or a broad-market fallback if the watchlist has too few tickers. A
-  z-score answers "how many standard deviations cheaper or more expensive is
-  this stock than its comparison group?" — averaging several ratios instead
-  of trusting one avoids a single misleading number driving the whole score.
-- **Quality** — counts how many financial-health checks (positive ROE,
-  positive margins, conservative debt, positive free cash flow, positive
-  growth) this stock passes, inspired by a simplified version of Piotroski's
-  F-Score. More checks passed = healthier balance sheet and income statement.
-- **Momentum** — blends the stock's own 12-month return (excluding the most
-  recent month — the standard academic "12-1 momentum" definition) measured
-  relative to its sector benchmark, with this app's existing short-term
-  Indicator Lean (moving averages, MACD, RSI).
-- **News Sentiment** — recency-weighted tone of recent headlines, using the
-  same finance-aware sentiment tagging used elsewhere in this app. A
-  headline from an hour ago counts far more than one from a week ago.
+1. **Technical** — four measurements of the price series, each expressed as a z-score against
+   this stock's own past six months: the gap between its 50-day and 200-day averages (trend),
+   RSI (momentum), position inside its Bollinger band (how stretched it is), and the 20-day
+   change in on-balance volume (whether volume is arriving on up days or down days).
+2. **Sentiment** — recent headline tone, weighted so a headline's influence halves every 24 hours,
+   then shrunk toward zero when there are only a handful of headlines. Three articles are a rumour;
+   thirty saying the same thing is a signal.
+3. **Macro** — VIX, optionally combined with an uploaded geopolitical-risk index. This is *not*
+   a direction. It is a haircut on the magnitude of the whole score, because when the market is
+   volatile every signal is less informative, not more bearish.
 
-**Combining them.** Each factor produces its own 0-100 score, then they're
-combined as a weighted average (weights adjustable below — they auto-rescale
-to add up to 100%). A factor with no available data for this ticker is left
-out entirely and the remaining weights are rescaled — it is never silently
-treated as a 0.
-                """)
+**Why it is measured in standard deviations.** A weighted sum of z-scores does not itself have a
+standard deviation of one — it has √(wᵀΣw), which depends on how correlated the parts happen to be
+that month. Left alone, a threshold of "+0.5" silently means 1.7σ when the components are
+independent and 1.2σ when they are correlated. The composite is therefore rescaled by its own
+rolling deviation, so one unit is one standard deviation for every ticker, always.
 
-            st.markdown("#### Factor weights")
-            wcol1, wcol2, wcol3, wcol4 = st.columns(4)
-            w_value = wcol1.slider("Value", 0, 100, int(DEFAULT_FACTOR_WEIGHTS["value"] * 100), key="w_value")
-            w_quality = wcol2.slider("Quality", 0, 100, int(DEFAULT_FACTOR_WEIGHTS["quality"] * 100), key="w_quality")
-            w_momentum = wcol3.slider("Momentum", 0, 100, int(DEFAULT_FACTOR_WEIGHTS["momentum"] * 100), key="w_momentum")
-            w_sentiment = wcol4.slider("Sentiment", 0, 100, int(DEFAULT_FACTOR_WEIGHTS["sentiment"] * 100), key="w_sentiment")
-            _raw_weights = {"value": w_value, "quality": w_quality, "momentum": w_momentum, "sentiment": w_sentiment}
-            _weight_total = sum(_raw_weights.values())
-            factor_weights = ({k: v / _weight_total for k, v in _raw_weights.items()} if _weight_total > 0
-                               else {"value": 0.25, "quality": 0.25, "momentum": 0.25, "sentiment": 0.25})
-            st.caption("Weights auto-rescale to add up to 100%, whatever you set them to individually.")
+**What it will not do.** It will not tell you what happens next. The backtest below is included
+specifically so you can see how weak the relationship is, and it uses a bootstrap p-value because
+the textbook one is invalid here — the windows overlap and the score is highly persistent, which
+makes ordinary regression p-values reject a true null roughly half the time.
+""")
 
-            with st.spinner("Computing factor score..."):
-                _peer_tickers = [t.strip().upper() for t in st.session_state.get("watchlist_text", "").split(",") if t.strip()]
-                peer_df = get_peer_fundamentals_df(_peer_tickers) if _peer_tickers else pd.DataFrame()
-
-                factor_benchmark_ticker = SECTOR_BENCHMARK_MAP.get(fundamentals.get("sector"), "SPY")
-                try:
-                    factor_benchmark_df = load_daily_data(factor_benchmark_ticker)
-                except Exception:
-                    factor_benchmark_df = None
-
-                value_result = compute_value_score(fundamentals, peer_df)
-                quality_result = compute_quality_score(fundamentals)
-                momentum_result = compute_momentum_score(daily_df, factor_benchmark_df, _score)
-                sentiment_result = compute_news_sentiment_score(news_items)
-                composite = compute_factor_composite(value_result, quality_result, momentum_result, sentiment_result, factor_weights)
-
-            if composite["score"] is None:
-                st.error("Not enough data available to compute a factor score for this ticker.")
-            else:
-                verdict_label, verdict_emoji = factor_score_verdict(composite["score"])
-
-                # The composite gets the verdict panel; the four sub-scores get
-                # bars beside the dial. A dial alone tells you where you landed
-                # but not what put you there — the bars answer that in the same
-                # glance, which is the whole point of showing them together.
-                _factor_tone = "bull" if composite["score"] >= 60 else ("bear" if composite["score"] < 40 else "neutral")
-                render_verdict(
-                    "Composite factor score",
-                    verdict_label,
-                    tone=_factor_tone,
-                    note="Value, Quality, Momentum and News Sentiment, weighted as set above. "
-                         "A snapshot of measurable factors — not a forecast.",
-                    right=f"{composite['score']:.0f}",
-                    right_sub="out of 100",
+            # --- Controls -------------------------------------------------
+            fs_c1, fs_c2, fs_c3 = st.columns(3)
+            with fs_c1:
+                w_tech = st.slider("Technical weight", 0, 100, 55, 5, key="fs_w_tech") / 100
+            with fs_c2:
+                w_sent = st.slider("Sentiment weight", 0, 100, 45, 5, key="fs_w_sent") / 100
+            with fs_c3:
+                horizon_bt = st.select_slider(
+                    "Backtest horizon (trading days)", options=[5, 10, 21, 42],
+                    value=10, key="fs_horizon",
+                    help="How far ahead the backtest looks when checking whether this score "
+                         "had any relationship with what happened next.",
                 )
 
-                gcol, bcol = st.columns([1, 1])
-                with gcol:
-                    # Dark dial: the coloured bands read as a faint temperature
-                    # scale behind the needle rather than competing with it, and
-                    # the value is set in the same tabular mono as every other
-                    # number in the product.
-                    gauge_fig = go.Figure(go.Indicator(
-                        mode="gauge+number",
-                        value=composite["score"],
-                        number={
-                            "suffix": "<span style='font-size:0.5em;color:#7E786C'> / 100</span>",
-                            "font": {"family": "JetBrains Mono, monospace", "size": 46, "color": "#F4F1EA"},
-                        },
-                        gauge={
-                            "axis": {
-                                "range": [0, 100],
-                                "tickcolor": "rgba(255,255,255,0.16)",
-                                "tickfont": {"family": "JetBrains Mono, monospace", "size": 10, "color": "#7E786C"},
-                            },
-                            "bar": {"color": CHART_GOLD, "thickness": 0.24},
-                            "bgcolor": "rgba(0,0,0,0)",
-                            "borderwidth": 0,
-                            "steps": [
-                                {"range": [0, 30], "color": "rgba(240,97,111,0.20)"},
-                                {"range": [30, 45], "color": "rgba(240,97,111,0.10)"},
-                                {"range": [45, 55], "color": "rgba(255,255,255,0.05)"},
-                                {"range": [55, 70], "color": "rgba(95,207,155,0.10)"},
-                                {"range": [70, 100], "color": "rgba(95,207,155,0.20)"},
-                            ],
-                            "threshold": {
-                                "line": {"color": "#F2E2C1", "width": 2},
-                                "thickness": 0.82,
-                                "value": composite["score"],
-                            },
-                        },
-                    ))
-                    gauge_fig.update_layout(
-                        height=280, margin=dict(l=24, r=24, t=24, b=8),
-                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                        font=dict(family="Inter, sans-serif", color=CHART_TEXT),
-                        transition=dict(duration=500, easing="cubic-in-out"),
-                    )
-                    # A dial has nothing to zoom or pan, so its toolbar is
-                    # pure clutter — turn it off rather than fade it.
-                    st.plotly_chart(gauge_fig, use_container_width=True,
-                                    config={"displayModeBar": False})
+            auto_beta = st.checkbox(
+                "Estimate this stock's volatility sensitivity from its own history",
+                value=True, key="fs_auto_beta",
+                help="Regresses daily returns on daily changes in VIX to size the macro haircut, "
+                     "instead of assuming a fixed value for every stock.",
+            )
 
-                with bcol:
-                    st.markdown(
-                        '<div style="font-family:Inter,sans-serif;font-size:0.6rem;letter-spacing:0.24em;'
-                        'text-transform:uppercase;color:#7E786C;font-weight:600;margin:0.6rem 0 0.9rem;">'
-                        'Sub-score contribution</div>',
-                        unsafe_allow_html=True,
+            fs_cfg = scoring.ScoringConfig(
+                w_technical=w_tech if (w_tech + w_sent) > 0 else 0.55,
+                w_sentiment=w_sent if (w_tech + w_sent) > 0 else 0.45,
+                forward_days=horizon_bt,
+            )
+
+            with st.spinner("Scoring..."):
+                # 1. Technical series over the stock's daily history.
+                tech_series, indicator_frame = scoring.technical_score(daily_df, fs_cfg)
+
+                # 2. Macro haircut from VIX (plus GPR if one was uploaded).
+                try:
+                    vix_series = load_daily_data("^VIX")["Close"]
+                except Exception:
+                    vix_series = None
+
+                beta_info = None
+                if vix_series is not None and auto_beta:
+                    beta_info = scoring.estimate_geo_beta(daily_df["Close"], vix_series, fs_cfg)
+                    if beta_info:
+                        fs_cfg.geo_beta = beta_info["geo_beta"]
+
+                if vix_series is not None:
+                    penalty_series = scoring.macro_risk_penalty(
+                        daily_df.index, vix_series,
+                        st.session_state.get("gpr_series"), fs_cfg,
                     )
-                    _w = composite["used_weights"]
+                    latest_penalty = float(penalty_series.iloc[-1])
+                else:
+                    penalty_series = pd.Series(0.0, index=daily_df.index)
+                    latest_penalty = 0.0
+
+                # 3. Sentiment from the headlines already fetched for this ticker.
+                #    Only a current reading is possible — there is no archive of
+                #    past headlines to rebuild a historical series from, which is
+                #    why the backtest below covers the technical component only.
+                sentiment_items = []
+                for _item in news_items:
+                    _tone = tag_sentiment(_item["title"] + " " + _item.get("description", ""))
+                    _age = _parse_news_timestamp(_item.get("published", ""))
+                    _age_hours = ((datetime.now() - _age).total_seconds() / 3600.0
+                                  if _age is not None else 24.0)
+                    sentiment_items.append({
+                        "sentiment": {"positive": 1.0, "negative": -1.0, "neutral": 0.0}[_tone],
+                        "age_hours": max(_age_hours, 0.0),
+                    })
+                sentiment_info = scoring.decayed_sentiment(sentiment_items, cfg=fs_cfg)
+                sentiment_sigma = (
+                    scoring.sentiment_to_sigma(sentiment_info["score"], sentiment_info["effective_n"])
+                    if sentiment_info else None
+                )
+
+                latest_tech = float(tech_series.iloc[-1]) if pd.notna(tech_series.iloc[-1]) else None
+                result = scoring.combine(latest_tech, sentiment_sigma, latest_penalty, fs_cfg)
+
+            if result["final"] is None:
+                st.error(
+                    "Not enough price history to score this ticker. The trend component needs "
+                    "roughly a year of daily data before it means anything."
+                )
+            else:
+                render_verdict(
+                    "Composite score",
+                    result["reading"],
+                    tone=result["tone"],
+                    note="Measured in standard deviations of this stock's own recent history. "
+                         "Zero is its normal; positive means conditions are stronger than usual. "
+                         "A description of the present, not a forecast.",
+                    right=f"{result['final']:+.2f}",
+                    right_sub="std deviations",
+                )
+
+                fcol1, fcol2, fcol3, fcol4 = st.columns(4)
+                fcol1.metric(
+                    "Technical", f"{latest_tech:+.2f}" if latest_tech is not None else "N/A",
+                    help="Blend of trend, momentum, band position and volume flow, in standard deviations.",
+                )
+                fcol2.metric(
+                    "Sentiment", f"{sentiment_sigma:+.2f}" if sentiment_sigma is not None else "No headlines",
+                    help="Recency-weighted headline tone, shrunk toward zero when few headlines exist.",
+                )
+                fcol3.metric(
+                    "Macro haircut", f"−{latest_penalty * 100:.0f}%",
+                    help="How much the market's current nervousness reduces confidence in the reading. "
+                         "Applied to magnitude, so it reduces conviction in both directions.",
+                )
+                fcol4.metric(
+                    "Before haircut", f"{result['raw']:+.2f}",
+                    help="The blended technical and sentiment score, before the macro haircut.",
+                )
+
+                if sentiment_sigma is None:
+                    st.caption(
+                        "No headlines available, so the sentiment component is dropped and the "
+                        "technical weight is renormalised to 100% — rather than multiplying the "
+                        "score by 0.55 and quietly pulling it toward neutral."
+                    )
+                else:
+                    _used = result["weights_used"]
+                    st.caption(
+                        f"Weights actually used: technical {_used.get('technical', 0) * 100:.0f}%, "
+                        f"sentiment {_used.get('sentiment', 0) * 100:.0f}% "
+                        f"(from {sentiment_info['n_items']} headlines, "
+                        f"newest {sentiment_info['newest_age_hours']:.0f}h old)."
+                    )
+
+                if beta_info:
+                    st.caption(
+                        f"Volatility sensitivity estimated from this stock's own history: a 1% rise in "
+                        f"VIX moved it {beta_info['slope'] * 100:+.2f}% on average "
+                        f"(R² {beta_info['r_squared']:.3f}, n={beta_info['n_obs']}), which sets the "
+                        f"maximum haircut to {fs_cfg.geo_beta * 100:.0f}%."
+                    )
+
+                # --- Score history ------------------------------------------
+                st.subheader("Score history")
+                explain(
+                    "The same score computed for every day in the past year, so you can see whether "
+                    "today's reading is unusual for this stock or simply where it normally sits."
+                )
+                composite_series = (tech_series * (1 - penalty_series)).dropna()
+                if not composite_series.empty:
+                    hist_fig = go.Figure()
+                    hist_fig.add_trace(go.Scatter(
+                        x=composite_series.index, y=composite_series,
+                        mode="lines", name="Composite",
+                        line=dict(width=1.8, color=CHART_GOLD, shape="spline", smoothing=0.35),
+                    ))
+                    for level, colour in ((fs_cfg.strong_threshold, CHART_JADE),
+                                          (-fs_cfg.strong_threshold, CHART_ROSE)):
+                        hist_fig.add_hline(y=level, line=dict(color=colour, width=1, dash="dot"),
+                                           opacity=0.5)
+                    hist_fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.18)", width=1))
+                    st.plotly_chart(style_chart(hist_fig, height=300, show_legend=False),
+                                    use_container_width=True)
+
+                    freq = scoring.threshold_frequency(composite_series, fs_cfg)
+                    if freq:
+                        st.caption(
+                            f"Over the last {freq['n_days']} trading days this stock read strongly "
+                            f"positive {freq['strong_positive_pct']:.0f}% of the time, strongly negative "
+                            f"{freq['strong_negative_pct']:.0f}%, and sat in the middle "
+                            f"{freq['neutral_pct']:.0f}%. Realised standard deviation "
+                            f"{freq['realised_sd']:.2f} — close to 1.0 means the scale is behaving."
+                        )
+
+                # --- Component breakdown -------------------------------------
+                st.subheader("What is driving it")
+                comp_rows = []
+                for key, label in scoring.COMPONENT_LABELS.items():
+                    zcol = f"z_{key}"
+                    if zcol in indicator_frame.columns and pd.notna(indicator_frame[zcol].iloc[-1]):
+                        comp_rows.append((label, float(indicator_frame[zcol].iloc[-1]),
+                                          fs_cfg.tech_subweights[key]))
+                if comp_rows:
                     render_score_bars([
-                        (f"Value · {_w.get('value', 0) * 100:.0f}% weight", value_result["score"]),
-                        (f"Quality · {_w.get('quality', 0) * 100:.0f}% weight", quality_result["score"]),
-                        (f"Momentum · {_w.get('momentum', 0) * 100:.0f}% weight", momentum_result["score"]),
-                        (f"Sentiment · {_w.get('sentiment', 0) * 100:.0f}% weight", sentiment_result["score"]),
+                        (f"{label} · {weight * 100:.0f}% weight", 50 + 50 * max(-2, min(2, z)) / 2)
+                        for label, z, weight in comp_rows
                     ])
+                    st.caption(
+                        "Bars are centred: the midpoint is this stock's own normal, full right is two "
+                        "standard deviations above it. Exact values: "
+                        + " · ".join(f"{label.split(' (')[0]} {z:+.2f}" for label, z, _ in comp_rows)
+                    )
+
+                corr = scoring.component_correlations(indicator_frame, fs_cfg)
+                if not corr.empty:
+                    with st.expander("Are these four measurements independent? (they are not)"):
+                        st.dataframe(corr.round(2), use_container_width=True)
+                        _mom = "Momentum (RSI)"
+                        _band = "Band position (stretch)"
+                        if _mom in corr.index and _band in corr.columns:
+                            st.caption(
+                                f"Momentum and band position correlate {corr.loc[_mom, _band]:.2f}. "
+                                "They largely measure the same thing — how stretched the price is — so "
+                                "their nominal 35% and 10% weights are not the effective ones. This is "
+                                "shown rather than hidden because it is the main weakness of any "
+                                "hand-weighted technical composite."
+                            )
+
+                # --- Backtest -------------------------------------------------
+                st.subheader("Does this score actually predict anything?")
+                explain(
+                    "This is the honest check. It asks whether the score had any relationship with "
+                    "what the price did next, using statistics that survive the fact that overlapping "
+                    "windows and a slow-moving score break the textbook ones."
+                )
+                with st.spinner("Backtesting..."):
+                    bt = scoring.backtest(composite_series, daily_df["Close"], horizon_bt, fs_cfg)
+
+                if "error" in bt:
+                    st.info(bt["error"])
+                else:
+                    bcol1, bcol2, bcol3 = st.columns(3)
+                    bcol1.metric(
+                        "Bootstrap p-value",
+                        f"{bt['p_bootstrap']:.3f}" if np.isfinite(bt["p_bootstrap"]) else "N/A",
+                        help="Probability of seeing a relationship this strong if there were really "
+                             "none. Computed by block bootstrap, which survives overlapping windows.",
+                    )
+                    bcol2.metric(
+                        "R²", f"{bt['r_squared']:.3f}",
+                        help="Share of the next period's move explained by the score. Near zero is "
+                             "the normal result.",
+                    )
+                    bcol3.metric(
+                        "Independent windows", f"{bt['n_independent']}",
+                        help="Non-overlapping periods — the real amount of evidence, far smaller "
+                             "than the raw row count.",
+                    )
+                    st.write(scoring.interpret_backtest(bt, fs_cfg))
+
+                    with st.expander("Full backtest detail, including the p-value you should ignore"):
+                        st.markdown(f"""
+| Statistic | Value | |
+| --- | --- | --- |
+| Observations (overlapping) | {bt['n_obs']} | inflated — each shares {horizon_bt - 1} days with the next |
+| Independent windows | {bt['n_independent']} | the honest sample size |
+| Slope | {bt['slope']:+.5f} | return per 1σ of score |
+| Correlation | {bt['r_value']:+.3f} | |
+| R² | {bt['r_squared']:.4f} | |
+| **Bootstrap p-value** | **{bt['p_bootstrap']:.4f}** | **use this one** |
+| Non-overlapping p-value | {bt['p_independent']:.4f} | agrees with the bootstrap |
+| Naive p-value | {bt['p_naive']:.4f} | *invalid here — see below* |
+| Directional hit rate | {bt['hit_rate_pct']:.1f}% | 50% is the coin-flip baseline |
+| Top-quartile mean return | {bt['top_quartile_mean_pct']:+.2f}% | |
+| Bottom-quartile mean return | {bt['bottom_quartile_mean_pct']:+.2f}% | |
+| Spread | {bt['spread_pct']:+.2f}% | |
+
+**Why the naive p-value is listed but not used.** Ordinary regression assumes independent
+observations. Here the forward return on consecutive days shares {horizon_bt - 1} of its
+{horizon_bt} days, and the score is a 126-day rolling statistic with autocorrelation near 0.99.
+Tested against simulated data containing *no* relationship at all, the naive p-value falls below
+0.05 roughly **half** the time, versus about 5% for the bootstrap. If the two numbers above differ
+a lot, that gap is the size of the error you would have made by trusting the familiar one.
+""")
 
                 st.warning(
-                    "This score describes the CURRENT snapshot of measurable factors — "
-                    "it is not a forecast, not personalized advice, and not validated as "
-                    "a predictive strategy for this specific stock. Factor investing is a "
-                    "statistical tendency across large portfolios over long horizons, not "
-                    "a guarantee for any individual stock at any individual time."
+                    "This score describes conditions that already exist. It is not a forecast, not "
+                    "personalised advice, and not a validated strategy. A single stock over a single "
+                    "period is one test, not evidence — and the backtest above is included so you can "
+                    "see that for yourself rather than take it on trust."
                 )
-
-                with st.expander(f"Value breakdown — {value_result['score']:.0f}/100" if value_result["score"] is not None else "Value breakdown — N/A"):
-                    if value_result["rows"]:
-                        vdf = pd.DataFrame(value_result["rows"])[["metric", "value", "peer_mean", "peer_std", "z", "score", "source"]]
-                        vdf.columns = ["Metric", "This stock", "Peer/anchor avg", "Peer/anchor std dev", "Z-score", "Score", "Compared against"]
-                        st.dataframe(vdf.round(2), hide_index=True, use_container_width=True)
-                        st.caption(
-                            "Z-score = (this stock's ratio − comparison average) ÷ comparison "
-                            "std dev, sign-flipped for P/E-style ratios so positive always means "
-                            "'cheaper.' Score = 50 + 15 × Z-score, clipped to [0, 100]."
-                        )
-                    else:
-                        st.write(value_result["note"])
-                    if peer_df.empty or len(peer_df) < 3:
-                        st.caption(
-                            "⚠️ Used broad-market fallback anchors, not a real peer comparison — "
-                            "add at least 3 tickers to your Watchlist (ideally in the same sector) "
-                            "for a more meaningful Value score."
-                        )
-
-                with st.expander(f"Quality breakdown — {quality_result['score']:.0f}/100" if quality_result["score"] is not None else "Quality breakdown — N/A"):
-                    if quality_result["checks"]:
-                        for label, passed in quality_result["checks"]:
-                            st.write(("✅ " if passed else "❌ ") + label)
-                        st.caption(f"{sum(1 for _, p in quality_result['checks'] if p)} of {len(quality_result['checks'])} checks passed.")
-                    else:
-                        st.write(quality_result["note"])
-
-                with st.expander(f"Momentum breakdown — {momentum_result['score']:.0f}/100" if momentum_result["score"] is not None else "Momentum breakdown — N/A"):
-                    mcol1, mcol2 = st.columns(2)
-                    mcol1.metric("Short-term technical score", f"{momentum_result['technical_score']:.0f}/100",
-                                 help="From the Indicator Lean: moving averages, MACD, RSI.")
-                    if momentum_result["momentum_12_1_score"] is not None:
-                        _lookback_months = momentum_result["lookback_days"] / 21
-                        mcol2.metric("12-1 momentum score", f"{momentum_result['momentum_12_1_score']:.0f}/100",
-                                     help="This stock's return over the available lookback window (excluding the most recent month) vs. its sector benchmark over the same window.")
-                        st.caption(
-                            f"This stock: {momentum_result['stock_12_1'] * 100:+.1f}% · "
-                            f"Benchmark ({factor_benchmark_ticker}): {momentum_result['benchmark_12_1'] * 100:+.1f}% · "
-                            f"Relative: {momentum_result['relative_12_1'] * 100:+.1f} percentage points "
-                            f"(measured over ~{_lookback_months:.0f} months of available history"
-                            + ("" if _lookback_months >= 11 else ", less than a full 12 — shorter price history was available")
-                            + ")."
-                        )
-                    else:
-                        st.write(momentum_result["note"])
-
-                with st.expander(f"Sentiment breakdown — {sentiment_result['score']:.0f}/100" if sentiment_result["score"] is not None else "Sentiment breakdown — N/A"):
-                    if sentiment_result["rows"]:
-                        sdf = pd.DataFrame(sentiment_result["rows"])
-                        sdf["age_hours"] = sdf["age_hours"].apply(lambda x: f"{x:.1f}h ago" if x is not None else "unknown")
-                        sdf["weight"] = sdf["weight"].round(2)
-                        sdf.columns = ["Headline", "Tone", "Age", "Recency weight"]
-                        st.dataframe(sdf, hide_index=True, use_container_width=True)
-                        st.caption(
-                            "Recency weight = 0.5 ^ (age in hours ÷ 24) — a headline from 24 "
-                            "hours ago counts half as much as one from right now; from 48 hours "
-                            "ago, a quarter as much."
-                        )
-                    else:
-                        st.write(sentiment_result["note"])
-
     except Exception as e:
         if _is_rate_limit_error(e):
             st.error(
@@ -5513,24 +5287,25 @@ with tab_watchlist:
                     "tally — not a validated ranking, and it can flip quickly as prices and headlines change."
                 )
 
-                # --- Ranked by Factor Score (Value + Quality + Momentum + Sentiment) ---
-                st.subheader("Ranked by Factor Score")
+                # --- Ranked by the same composite the Factor Score tab computes ---
+                st.subheader("Ranked by composite score")
                 st.caption(
-                    "Uses the default factor weights (Value 35% / Quality 20% / Momentum 30% / "
-                    "Sentiment 15%) — open the 🧮 Factor Score tab on a single ticker to adjust "
-                    "weights and see the full math behind each score. Value is z-scored against "
-                    "this watchlist itself, so it's a real peer comparison here."
+                    "The same technical-plus-sentiment composite the Factor Score tab computes, with "
+                    "the same macro haircut, so the two views cannot disagree about a ticker. Scores "
+                    "are in standard deviations of each stock's OWN history — which makes this a "
+                    "ranking of how unusual each stock looks against itself, not a comparison of the "
+                    "stocks against each other."
                 )
-                if "Factor score" in results_df.columns and results_df["Factor score"].notna().any():
-                    factor_sorted_df = results_df.dropna(subset=["Factor score"]).sort_values(
-                        "Factor score", ascending=False
+                if "Composite score" in results_df.columns and results_df["Composite score"].notna().any():
+                    factor_sorted_df = results_df.dropna(subset=["Composite score"]).sort_values(
+                        "Composite score", ascending=False
                     ).reset_index(drop=True)
                     st.dataframe(
-                        factor_sorted_df[["Ticker", "Last price", "Sector", "Factor score", "Indicator lean"]],
+                        factor_sorted_df[["Ticker", "Last price", "Sector", "Composite score", "Reading", "Indicator lean"]],
                         hide_index=True, use_container_width=True,
                     )
                 else:
-                    st.write("Not enough data to compute Factor Scores for this watchlist.")
+                    st.write("Not enough price history to score the tickers in this watchlist.")
 
                 # --- Sector concentration (factual — counts tickers, not $ exposure) ---
                 st.subheader("Sector concentration in this watchlist")
