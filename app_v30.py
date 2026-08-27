@@ -19,6 +19,15 @@ import storage
 import scoring
 import support
 import quant
+import deals
+
+# Stamped before any work happens so the status bar can report how long a
+# rerun actually took. Streamlit re-executes this entire file on every
+# interaction, including the body of every tab whether or not it is the
+# one on screen, so this number is the real cost of a click — and it is
+# the number to watch when deciding whether the app has outgrown a flat
+# tab rail.
+_render_start = time.perf_counter()
 import pyotp
 import qrcode
 import html as html_lib
@@ -1130,7 +1139,7 @@ hr, [data-testid="stDivider"] hr {
     font-size: 0.8rem;
     color: var(--text-300);
     margin-top: 0.4rem;
-    max-width: 46ch;
+    max-width: 62ch;
     line-height: 1.6;
 }
 .tv-verdict-r {
@@ -1423,6 +1432,223 @@ hr, [data-testid="stDivider"] hr {
     0%        { left: -22%; opacity: 0; }
     12%       { opacity: 1; }
     55%, 100% { left: 100%; opacity: 0; }
+}
+
+/* ==================================================================
+   DEAL ROOM — surfaces for the banking and private-equity models
+
+   These screens are documents more than dashboards: a financing memo, a
+   tombstone, a recommendation. So they borrow the typography of print —
+   dotted leaders, a serif measure, a stamp — rather than the metric-box
+   grammar the market screens use. That contrast is the point; a reader
+   should feel they have moved from a terminal to a deal file.
+   ================================================================== */
+
+/* --- Sources & uses ledger ---------------------------------------
+   Leader lines, because that is how a financing memo is set. The dots
+   are a repeating radial gradient rather than a border-style, which
+   keeps them from thickening at high pixel ratios. */
+.tv-ledger {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.1rem;
+    font-family: var(--font-ui);
+    margin: 0.35rem 0 0.2rem;
+}
+.tv-ledger-head {
+    font-family: var(--font-ui);
+    font-size: 0.56rem;
+    font-weight: 600;
+    letter-spacing: 0.26em;
+    text-transform: uppercase;
+    color: var(--gold-500);
+    padding-bottom: 0.5rem;
+    margin-bottom: 0.35rem;
+    border-bottom: 1px solid rgba(212, 176, 120, 0.22);
+}
+.tv-ledger-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    padding: 0.42rem 0;
+    animation: ledger-in 0.5s var(--ease) both;
+}
+/* Staggered so the ledger reads as being written out, top to bottom. */
+.tv-ledger-row:nth-child(2) { animation-delay: 0.05s; }
+.tv-ledger-row:nth-child(3) { animation-delay: 0.10s; }
+.tv-ledger-row:nth-child(4) { animation-delay: 0.15s; }
+.tv-ledger-row:nth-child(5) { animation-delay: 0.20s; }
+.tv-ledger-row:nth-child(6) { animation-delay: 0.25s; }
+.tv-ledger-label {
+    font-size: 0.82rem;
+    color: var(--text-300);
+    white-space: nowrap;
+}
+.tv-ledger-dots {
+    flex: 1 1 auto;
+    height: 1px;
+    min-width: 1.5rem;
+    transform: translateY(-0.18rem);
+    background-image: radial-gradient(circle, rgba(255,255,255,0.24) 0.6px, transparent 0.7px);
+    background-size: 5px 1px;
+    background-repeat: repeat-x;
+}
+.tv-ledger-value {
+    font-family: var(--font-mono);
+    font-size: 0.86rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-100);
+    white-space: nowrap;
+}
+.tv-ledger-row.total {
+    margin-top: 0.35rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.10);
+}
+.tv-ledger-row.total .tv-ledger-label { color: var(--text-100); font-weight: 600; }
+.tv-ledger-row.total .tv-ledger-value { color: var(--gold-300); font-weight: 600; }
+.tv-ledger-row.equity .tv-ledger-value { color: var(--jade); }
+@keyframes ledger-in {
+    from { opacity: 0; transform: translateX(-8px); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+
+/* --- Deal tombstone ----------------------------------------------
+   The strip of agreed terms that sits at the top of every deal note.
+   Monospaced and tabular so the columns line up down the row. */
+.tv-tombstone {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+    margin: 0.6rem 0 1rem;
+}
+.tv-tomb-cell {
+    flex: 1 1 130px;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 10px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.028), rgba(255,255,255,0.008));
+    animation: metric-in 0.55s var(--ease) both;
+}
+.tv-tomb-cell:nth-child(2) { animation-delay: 0.06s; }
+.tv-tomb-cell:nth-child(3) { animation-delay: 0.12s; }
+.tv-tomb-cell:nth-child(4) { animation-delay: 0.18s; }
+.tv-tomb-cell:nth-child(5) { animation-delay: 0.24s; }
+.tv-tomb-k {
+    font-family: var(--font-ui);
+    font-size: 0.52rem;
+    font-weight: 600;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--text-500);
+}
+.tv-tomb-v {
+    font-family: var(--font-mono);
+    font-size: 1.05rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-100);
+    margin-top: 0.3rem;
+}
+.tv-tomb-v.pos { color: var(--jade); }
+.tv-tomb-v.neg { color: var(--rose); }
+
+/* --- Recommendation stamp ----------------------------------------
+   A memo ends in a decision, and a decision deserves to land like one.
+   The press-in is quick and slightly overshoots, the way a rubber stamp
+   does; the ring is drawn at a slight angle because a perfectly square
+   stamp reads as a badge, and a badge reads as decoration. */
+.tv-stamp-wrap {
+    display: flex;
+    justify-content: center;
+    padding: 1.1rem 0 0.5rem;
+    perspective: 700px;
+}
+.tv-stamp {
+    --stamp: var(--gold-300);
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.18rem;
+    padding: 0.85rem 2.1rem;
+    border: 2px solid var(--stamp);
+    border-radius: 6px;
+    color: var(--stamp);
+    transform: rotate(-2.4deg);
+    animation: stamp-in 0.62s cubic-bezier(.2,1.5,.4,1) both;
+    box-shadow: 0 0 32px -12px var(--stamp), inset 0 0 22px -16px var(--stamp);
+    background: rgba(255, 255, 255, 0.012);
+}
+.tv-stamp-verdict {
+    font-family: var(--font-ui);
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    line-height: 1;
+}
+.tv-stamp-sub {
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    opacity: 0.72;
+}
+@keyframes stamp-in {
+    0%   { opacity: 0; transform: rotate(-2.4deg) scale(2.1); filter: blur(9px); }
+    55%  { opacity: 1; filter: blur(0); }
+    100% { opacity: 1; transform: rotate(-2.4deg) scale(1); filter: blur(0); }
+}
+
+/* --- Memo document ------------------------------------------------
+   Set as a document, not a panel: a serif measure capped near 68
+   characters, because the memo is the one screen in the app someone
+   reads top to bottom rather than scans. */
+.tv-memo {
+    border: 1px solid rgba(255, 255, 255, 0.075);
+    border-radius: 14px;
+    background:
+        radial-gradient(120% 60% at 50% 0%, rgba(212,176,120,0.045), transparent 60%),
+        linear-gradient(180deg, rgba(255,255,255,0.022), rgba(255,255,255,0.006));
+    padding: 2rem 2.2rem 2.2rem;
+    animation: reveal-up 0.7s var(--ease) both;
+}
+.tv-memo h1, .tv-memo h2 {
+    font-family: var(--font-display) !important;
+    color: var(--text-100) !important;
+    letter-spacing: -0.015em;
+}
+.tv-memo h1 { font-size: 1.7rem !important; margin-bottom: 0.2rem !important; }
+.tv-memo h2 {
+    font-size: 1.02rem !important;
+    margin: 1.6rem 0 0.55rem !important;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+.tv-memo p, .tv-memo li {
+    font-family: var(--font-ui) !important;
+    font-size: 0.88rem !important;
+    line-height: 1.72 !important;
+    color: var(--text-300) !important;
+    max-width: 68ch;
+}
+.tv-memo strong { color: var(--text-100) !important; }
+.tv-memo em { color: var(--text-500) !important; }
+.tv-memo hr { border-color: rgba(255, 255, 255, 0.07) !important; }
+
+/* --- Phone ---------------------------------------------------------- */
+@media (max-width: 640px) {
+    .tv-memo { padding: 1.2rem 1.1rem 1.4rem; }
+    .tv-memo h1 { font-size: 1.35rem !important; }
+    .tv-stamp { padding: 0.7rem 1.4rem; }
+    .tv-stamp-verdict { font-size: 1.15rem; }
+    .tv-ledger-label, .tv-ledger-value { font-size: 0.76rem; }
+    .tv-tomb-cell { flex: 1 1 42%; }
+}
+
+/* Motion is decoration here; anyone who has asked the OS to stop it gets
+   the layout with none of the movement. */
+@media (prefers-reduced-motion: reduce) {
+    .tv-stamp, .tv-ledger-row, .tv-tomb-cell, .tv-memo { animation: none !important; }
 }
 
 /* ==================================================================
@@ -2405,10 +2631,13 @@ current_ticker = (st.session_state.get("analysis_run") or {}).get("ticker", "")
 # which is two clicks and a whole navigation slot for one list. It now sits
 # under the stock-specific news in Analysis, where market context is
 # actually being read.
-(tab_analysis, tab_fundamentals, tab_factors, tab_quant,
+# Deal Room sits next to Quant Desk because they are the same kind of
+# surface — models with assumptions rather than readouts of what happened
+# — and a reader who understands one will expect the other beside it.
+(tab_analysis, tab_fundamentals, tab_factors, tab_quant, tab_deals,
  tab_tradesetup, tab_journal, tab_watchlist, tab_digest,
  tab_multiasset, tab_calendar, tab_settings, tab_support) = st.tabs(
-    ["Analysis", "Fundamentals", "Factor Score", "Quant Desk",
+    ["Analysis", "Fundamentals", "Factor Score", "Quant Desk", "Deal Room",
      "Trade Setup", "Journal", "Watchlist", "Digest",
      "Multi-Asset", "Calendar", "Settings", "Support"]
 )
@@ -2820,6 +3049,135 @@ def get_fundamentals(ticker_symbol: str) -> dict:
 
 
 @st.cache_data(ttl=3600)
+def get_deal_inputs(ticker_symbol: str) -> dict:
+    """
+    The balance-sheet and earnings figures the deal models need, in
+    absolute currency units.
+
+    Kept separate from get_fundamentals because that function returns
+    ratios for scoring and this one returns the raw quantities an LBO or
+    an accretion model multiplies together. Mixing them would mean every
+    factor-score refresh pulled fields it never reads.
+
+    Everything is optional. A field that is missing comes back as None
+    rather than zero, because a zero EBITDA silently produces an infinite
+    multiple and a zero share count produces an infinite price.
+    """
+    stock = yf.Ticker(ticker_symbol)
+    info = yf_call_with_retry(lambda: stock.info) or {}
+
+    def num(*keys):
+        for key in keys:
+            value = info.get(key)
+            if value is not None and isinstance(value, (int, float)) and np.isfinite(value):
+                return float(value)
+        return None
+
+    price = num("currentPrice", "regularMarketPrice", "previousClose")
+    shares = num("sharesOutstanding", "impliedSharesOutstanding")
+    debt = num("totalDebt")
+    cash = num("totalCash")
+    ebitda = num("ebitda")
+    revenue = num("totalRevenue")
+    net_income = num("netIncomeToCommon")
+    market_cap = num("marketCap") or (price * shares if price and shares else None)
+
+    net_debt = None
+    if debt is not None or cash is not None:
+        net_debt = (debt or 0.0) - (cash or 0.0)
+
+    enterprise_value = num("enterpriseValue")
+    if enterprise_value is None and market_cap is not None and net_debt is not None:
+        enterprise_value = market_cap + net_debt
+
+    # EBIT is not published directly. Operating margin times revenue is
+    # the closest reconstruction available from the info dict, and it is
+    # labelled as derived wherever it is shown.
+    operating_margin = num("operatingMargins")
+    ebit = revenue * operating_margin if revenue and operating_margin is not None else None
+
+    return {
+        "ticker": ticker_symbol,
+        "sector": info.get("sector"),
+        "industry": info.get("industry"),
+        "currency": info.get("currency") or "USD",
+        "price": price,
+        "shares": shares,
+        "market_cap": market_cap,
+        "enterprise_value": enterprise_value,
+        "total_debt": debt,
+        "cash": cash,
+        "net_debt": net_debt,
+        "revenue": revenue,
+        "ebitda": ebitda,
+        "ebit": ebit,
+        "net_income": net_income,
+        "eps": num("trailingEps"),
+        "book_value_per_share": num("bookValue"),
+        "ebitda_margin": num("ebitdaMargins"),
+        "revenue_growth": num("revenueGrowth"),
+        "operating_cashflow": num("operatingCashflow"),
+        "free_cashflow": num("freeCashflow"),
+    }
+
+
+@st.cache_data(ttl=3600)
+def get_financial_statements(ticker_symbol: str) -> dict:
+    """
+    Annual income statement, balance sheet and cash flow as dataframes.
+
+    Each is returned exactly as the provider gives it — line items down
+    the index, period-end dates across the columns — because deals.py
+    does the normalising and knows how to look a row up under several
+    names. Any statement that fails to fetch comes back empty rather
+    than raising, so one missing cash flow does not cost the other two.
+    """
+    stock = yf.Ticker(ticker_symbol)
+    out = {}
+    for key, getter in (("income", lambda: stock.income_stmt),
+                        ("balance", lambda: stock.balance_sheet),
+                        ("cashflow", lambda: stock.cashflow)):
+        try:
+            frame = yf_call_with_retry(getter)
+            out[key] = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+        except Exception:
+            out[key] = pd.DataFrame()
+    return out
+
+
+@st.cache_data(ttl=3600)
+def get_peer_multiples(tickers: tuple) -> pd.DataFrame:
+    """
+    A comp table: one row per peer, one column per trading multiple.
+
+    Peers that fail to fetch are dropped silently and the count of what
+    survived is reported by the caller, which matters — a comp set that
+    quietly shrinks from ten names to four changes the median a lot, and
+    a screen that does not say so is lying by omission.
+    """
+    rows = []
+    for symbol in tickers:
+        try:
+            d = get_deal_inputs(symbol)
+        except Exception:
+            continue
+        ev, price = d.get("enterprise_value"), d.get("price")
+        row = {"Ticker": symbol}
+        if ev and d.get("revenue"):
+            row["EV/Revenue"] = ev / d["revenue"]
+        if ev and d.get("ebitda"):
+            row["EV/EBITDA"] = ev / d["ebitda"]
+        if ev and d.get("ebit"):
+            row["EV/EBIT"] = ev / d["ebit"]
+        if price and d.get("eps"):
+            row["P/E"] = price / d["eps"]
+        if price and d.get("book_value_per_share"):
+            row["P/B"] = price / d["book_value_per_share"]
+        if len(row) > 1:
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
 @st.cache_data(ttl=3600)
 def get_earnings_and_dividends(ticker_symbol: str) -> dict:
     """
@@ -6096,6 +6454,987 @@ after the fix is **4.4%**.
             )
 
 
+
+# ----------------------------------------------------------------------
+# DEAL ROOM RENDERERS
+#
+# Kept next to the tab that uses them rather than with the general render
+# helpers above: these draw print furniture — a ledger, a tombstone, a
+# stamp — that only the deal screens have any use for.
+# ----------------------------------------------------------------------
+def fmt_money(value, currency: str = "USD", decimals: int = 0) -> str:
+    """Currency in the units a deal is discussed in: millions and billions."""
+    if value is None or (isinstance(value, float) and not np.isfinite(value)):
+        return "—"
+    symbol = {"USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥"}.get(currency, "")
+    sign = "-" if value < 0 else ""
+    magnitude = abs(float(value))
+    if magnitude >= 1e9:
+        return f"{sign}{symbol}{magnitude / 1e9:,.2f}bn"
+    if magnitude >= 1e6:
+        return f"{sign}{symbol}{magnitude / 1e6:,.{decimals}f}m"
+    if magnitude >= 1e3:
+        return f"{sign}{symbol}{magnitude / 1e3:,.0f}k"
+    return f"{sign}{symbol}{magnitude:,.2f}"
+
+
+def render_ledger(title: str, rows: list, total_label: str, total_value: str,
+                  highlight: str = "") -> None:
+    """
+    A financing-memo ledger: label, dotted leader, value.
+
+    The leader line is what makes this read as a document rather than a
+    table, and it is also functional — across a wide column the eye
+    otherwise loses which value belongs to which label.
+    """
+    body = "".join(
+        f'<div class="tv-ledger-row{" equity" if label == highlight else ""}">'
+        f'<span class="tv-ledger-label">{html_lib.escape(str(label))}</span>'
+        f'<span class="tv-ledger-dots"></span>'
+        f'<span class="tv-ledger-value">{html_lib.escape(str(value))}</span></div>'
+        for label, value in rows
+    )
+    st.markdown(
+        f'<div class="tv-ledger-head">{html_lib.escape(title)}</div>'
+        f'<div class="tv-ledger">{body}'
+        f'<div class="tv-ledger-row total">'
+        f'<span class="tv-ledger-label">{html_lib.escape(total_label)}</span>'
+        f'<span class="tv-ledger-dots"></span>'
+        f'<span class="tv-ledger-value">{html_lib.escape(total_value)}</span></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_tombstone(cells: list) -> None:
+    """The agreed terms, as the strip that heads every deal note.
+
+    Each cell is (label, value, tone) where tone is "", "pos" or "neg".
+    """
+    body = "".join(
+        f'<div class="tv-tomb-cell"><div class="tv-tomb-k">{html_lib.escape(str(k))}</div>'
+        f'<div class="tv-tomb-v {tone}">{html_lib.escape(str(v))}</div></div>'
+        for k, v, tone in cells
+    )
+    st.markdown(f'<div class="tv-tombstone">{body}</div>', unsafe_allow_html=True)
+
+
+def render_stamp(verdict: str, tone: str = "neutral", sub: str = "") -> None:
+    """The decision, pressed onto the memo."""
+    colour = {"bull": "#5FCF9B", "bear": "#F0616F"}.get(tone, "#D4B078")
+    st.markdown(
+        f'<div class="tv-stamp-wrap"><div class="tv-stamp" style="--stamp:{colour};">'
+        f'<div class="tv-stamp-verdict">{html_lib.escape(verdict)}</div>'
+        f'<div class="tv-stamp-sub">{html_lib.escape(sub)}</div></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def waterfall_chart(labels: list, values: list, title_y: str, height: int = 380):
+    """
+    A bridge. Every model in the Deal Room produces one, because the
+    decomposition is the finding — an IRR without its drivers, or an
+    accretion figure without its moving parts, is a number you cannot
+    argue with or learn anything from.
+    """
+    measures = ["relative"] * (len(values) - 1) + ["total"]
+    fig = go.Figure(go.Waterfall(
+        orientation="v", measure=measures, x=labels, y=values,
+        text=[fmt_money(v) for v in values], textposition="outside",
+        textfont=dict(family="JetBrains Mono, monospace", size=10, color=CHART_TEXT),
+        connector=dict(line=dict(color="rgba(255,255,255,0.14)", width=1, dash="dot")),
+        increasing=dict(marker=dict(color="rgba(95,207,155,0.55)",
+                                    line=dict(color=CHART_JADE, width=1.2))),
+        decreasing=dict(marker=dict(color="rgba(240,97,111,0.5)",
+                                    line=dict(color=CHART_ROSE, width=1.2))),
+        totals=dict(marker=dict(color="rgba(212,176,120,0.55)",
+                                line=dict(color=CHART_GOLD, width=1.4))),
+    ))
+    style_chart(fig, height=height, show_legend=False)
+    # The theme's right margin is sized for tick labels only; a rotated
+    # axis title on top of them needs its own room or it is squeezed into
+    # an unreadable column against the edge of the card.
+    fig.update_layout(margin=dict(l=8, r=92, t=42, b=14), hovermode="x")
+    fig.update_yaxes(title_text=title_y, title_standoff=8)
+    fig.update_xaxes(showspikes=False, automargin=True)
+    return fig
+
+
+def sensitivity_heatmap(grid: pd.DataFrame, row_title: str, col_title: str,
+                        suffix: str = "%", midpoint: float = None):
+    """
+    The grid that should be read before the point estimate.
+
+    Diverging around a reference value — a hurdle rate, or EPS neutrality
+    — rather than around the data's own middle, so the colour answers
+    "does this clear the bar" instead of "is this above average for this
+    table", which is a question nobody asked.
+    """
+    z = grid.to_numpy(dtype=float)
+    if midpoint is None:
+        midpoint = float(np.nanmedian(z))
+    span = max(abs(np.nanmax(z) - midpoint), abs(midpoint - np.nanmin(z)), 1e-9)
+    fig = go.Figure(go.Heatmap(
+        z=z,
+        x=[f"{c:g}" for c in grid.columns], y=[f"{r:g}" for r in grid.index],
+        zmid=midpoint, zmin=midpoint - span, zmax=midpoint + span,
+        colorscale=[[0.0, "#8E3A42"], [0.5, "rgba(20,24,32,0.92)"], [1.0, "#D4B078"]],
+        text=z, texttemplate="%{text:.1f}" + suffix,
+        textfont=dict(family="JetBrains Mono, monospace", size=11),
+        colorbar=dict(thickness=10, outlinewidth=0,
+                      tickfont=dict(size=10, color=CHART_MUTED)),
+    ))
+    style_chart(fig, height=90 + 46 * len(grid), show_legend=False)
+    # The colour bar lives in the right margin; the theme's 8px is enough
+    # for nothing and clips its tick labels in half.
+    fig.update_layout(margin=dict(l=8, r=56, t=34, b=8), hovermode="closest")
+    fig.update_yaxes(side="left", showgrid=False, automargin=True, title_text=row_title)
+    fig.update_xaxes(showspikes=False, side="bottom", automargin=True, title_text=col_title)
+    return fig
+
+
+with tab_deals:
+    # ----------------------------------------------------------------------
+    # DEAL ROOM — the models a banking or private-equity desk runs.
+    #
+    # Same shape as the Quant Desk: one tab, sub-tabs inside, mathematics
+    # in a module that imports no Streamlit (deals.py) and is tested
+    # directly (test_deals.py). Every screen is gated behind a button,
+    # because Streamlit executes every tab body on every interaction and
+    # an LBO grid is 81 full model runs.
+    # ----------------------------------------------------------------------
+    st.markdown(
+        '<div class="tv-desk-head">'
+        '<div class="tv-desk-eyebrow">Banking &amp; Private Equity</div>'
+        '<div class="tv-desk-title">Deal Room</div>'
+        '<div class="tv-desk-sub">Buyout · Merger · Comparables · Value creation · Memo</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    sub_lbo, sub_ma, sub_comps, sub_opco, sub_memo = st.tabs(
+        ["LBO", "M&A", "Comparables", "Value Creation", "Memo"])
+
+    # ==================================================================
+    # LEVERAGED BUYOUT
+    # ==================================================================
+    with sub_lbo:
+        st.subheader("Leveraged buyout")
+        explain(
+            "A buyout firm buys a company mostly with borrowed money, uses the company's own "
+            "cash flow to pay that debt down, and sells five years later. Because the debt "
+            "shrinks while the business is worth roughly the same, the sliver of equity they "
+            "put in is worth far more at the end. This model runs that arithmetic year by "
+            "year and then tells you how much of the return came from actually improving the "
+            "business, versus from borrowing, versus from simply assuming you sell at a "
+            "higher price than you paid."
+        )
+
+        lbo_target = st.text_input(
+            "Target", value=current_ticker or "CAT", key="lbo_ticker",
+            help="Any listed company. Its current EBITDA, revenue and debt are pulled as the "
+                 "starting point, then every assumption below is yours to set.",
+        ).upper().strip()
+
+        if st.button("Load company financials", key="lbo_load"):
+            with st.spinner(f"Pulling {lbo_target}..."):
+                try:
+                    st.session_state["lbo_inputs"] = get_deal_inputs(lbo_target)
+                except Exception as e:
+                    st.session_state.pop("lbo_inputs", None)
+                    st.error(f"Couldn't load {lbo_target}: {e}")
+
+        seed = st.session_state.get("lbo_inputs")
+        if seed and seed.get("ticker") != lbo_target:
+            seed = None  # the box changed since the last load; don't mix companies
+
+        if seed:
+            currency = seed.get("currency", "USD")
+            render_tombstone([
+                ("Company", seed["ticker"], ""),
+                ("Revenue", fmt_money(seed.get("revenue"), currency), ""),
+                ("EBITDA", fmt_money(seed.get("ebitda"), currency), ""),
+                ("Net debt", fmt_money(seed.get("net_debt"), currency), ""),
+                ("EV/EBITDA", f"{seed['enterprise_value'] / seed['ebitda']:.1f}x"
+                 if seed.get("enterprise_value") and seed.get("ebitda") else "—", ""),
+            ])
+            if not seed.get("ebitda") or seed["ebitda"] <= 0:
+                st.warning(
+                    f"{seed['ticker']} reports no positive EBITDA, so a leveraged structure "
+                    "has nothing to service debt out of. The model below will run on the "
+                    "default figures instead — change the target or treat this as a "
+                    "hypothetical."
+                )
+        else:
+            st.info("Load a company to seed the model, or set the assumptions by hand below.")
+            currency = "USD"
+
+        base_ebitda = (seed.get("ebitda") if seed and seed.get("ebitda") and seed["ebitda"] > 0
+                       else 100e6)
+        base_revenue = (seed.get("revenue") if seed and seed.get("revenue")
+                        else base_ebitda * 5)
+        entry_mult_default = 9.0
+        if seed and seed.get("enterprise_value") and base_ebitda > 0:
+            entry_mult_default = float(np.clip(seed["enterprise_value"] / base_ebitda, 4.0, 20.0))
+
+        st.markdown("###### Assumptions")
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            entry_multiple = st.slider("Entry multiple (x EBITDA)", 4.0, 20.0,
+                                       round(entry_mult_default, 1), 0.25, key="lbo_entry")
+            exit_multiple = st.slider(
+                "Exit multiple (x EBITDA)", 4.0, 20.0, round(entry_mult_default, 1), 0.25,
+                key="lbo_exit",
+                help="Defaulted to the entry multiple on purpose. Assuming you sell higher "
+                     "than you bought is the easiest way to manufacture an IRR, and the "
+                     "value bridge below will show you exactly how much of the return it "
+                     "invented.",
+            )
+            hold_years = st.slider("Hold period (years)", 3, 8, 5, key="lbo_hold")
+        with a2:
+            debt_turns = st.slider("Leverage (turns of EBITDA)", 0.0, 8.0, 4.5, 0.25,
+                                   key="lbo_turns")
+            interest_rate = st.slider("Blended interest rate", 2.0, 18.0, 9.0, 0.25,
+                                      format="%.2f%%", key="lbo_rate") / 100.0
+            cash_sweep = st.slider("Cash sweep", 0, 100, 90, 5, format="%d%%",
+                                   key="lbo_sweep",
+                                   help="The share of free cash flow that goes to repaying "
+                                        "debt rather than sitting on the balance sheet.") / 100.0
+        with a3:
+            revenue_growth = st.slider("Revenue growth a year", -10.0, 25.0, 4.0, 0.5,
+                                       format="%.1f%%", key="lbo_growth") / 100.0
+            margin_improvement = st.slider(
+                "Margin improvement a year", -2.0, 3.0, 0.5, 0.25, format="%.2fpp",
+                key="lbo_margin",
+                help="In percentage points of EBITDA margin. Half a point a year is a real "
+                     "operating programme; two points a year is a story.") / 100.0
+            tax_rate = st.slider("Tax rate", 0, 45, 25, 1, format="%d%%",
+                                 key="lbo_tax") / 100.0
+
+        if st.button("Run the LBO", type="primary", key="lbo_run"):
+            with st.spinner("Solving the capital structure..."):
+                assumptions = deals.LBOAssumptions(
+                    company=(seed or {}).get("ticker", lbo_target) or "Target",
+                    entry_ebitda=float(base_ebitda),
+                    entry_multiple=entry_multiple,
+                    entry_net_debt=float(max((seed or {}).get("net_debt") or 0.0, 0.0)),
+                    debt_turns=debt_turns,
+                    interest_rate=interest_rate,
+                    cash_sweep=cash_sweep,
+                    min_cash=float(base_revenue) * 0.03,
+                    revenue=float(base_revenue),
+                    revenue_growth=revenue_growth,
+                    margin_improvement=margin_improvement,
+                    tax_rate=tax_rate,
+                    exit_multiple=exit_multiple,
+                    hold_years=int(hold_years),
+                )
+                st.session_state["lbo_result"] = deals.run_lbo(assumptions)
+                st.session_state["lbo_currency"] = currency
+
+        lbo_res = st.session_state.get("lbo_result")
+        if lbo_res is None:
+            st.info("Set the assumptions and select **Run the LBO**.")
+        else:
+            cur = st.session_state.get("lbo_currency", "USD")
+            render_verdict(
+                "Sponsor return",
+                f"{lbo_res.irr * 100:.1f}% IRR" if lbo_res.irr is not None else "No return",
+                tone=("bear" if lbo_res.equity_wiped or (lbo_res.irr or 0) < 0.10
+                      else "bull" if (lbo_res.irr or 0) >= deals.TARGET_IRR else "neutral"),
+                note=deals.lbo_verdict(lbo_res),
+                right=f"{lbo_res.moic:.2f}x" if lbo_res.moic else "—",
+                right_sub="MoIC",
+            )
+
+            st.markdown("###### Sources and uses")
+            explain(
+                "Where the money to buy the company comes from, and what it is spent on. "
+                "The two sides must equal each other — that is the whole constraint. The "
+                "sponsor's equity is whatever the debt does not cover, which is why more "
+                "leverage means a smaller cheque and a bigger multiple on it."
+            )
+            su = lbo_res.sources_uses
+            su1, su2 = st.columns(2)
+            with su1:
+                render_ledger(
+                    "Sources",
+                    [(k, fmt_money(v, cur)) for k, v in su["sources"].items()],
+                    "Total sources", fmt_money(sum(su["sources"].values()), cur),
+                    highlight="Sponsor equity",
+                )
+            with su2:
+                render_ledger(
+                    "Uses",
+                    [(k, fmt_money(v, cur)) for k, v in su["uses"].items()],
+                    "Total uses", fmt_money(sum(su["uses"].values()), cur),
+                )
+
+            st.subheader("Value creation bridge")
+            explain(
+                "The one chart that says whether a buyout was skill or weather. Growing "
+                "EBITDA is something the sponsor did. Paying down debt is something the "
+                "business did. A higher exit multiple is something the market did — and if "
+                "that bar is the tall one, the returns were borrowed from an assumption "
+                "rather than earned."
+            )
+            bridge_frame = deals.lbo_bridge_frame(lbo_res)
+            st.plotly_chart(
+                waterfall_chart(list(bridge_frame["Driver"]), list(bridge_frame["Value"]),
+                                f"Equity value created ({cur})"),
+                use_container_width=True,
+            )
+
+            st.subheader("Debt schedule")
+            explain(
+                "Debt falls as cash flow sweeps it away; leverage falls faster because "
+                "EBITDA is growing at the same time. The dashed line is a typical covenant "
+                "ceiling — crossing it in real life means renegotiating with lenders from "
+                "a weak position."
+            )
+            sched = lbo_res.schedule
+            d_fig = go.Figure()
+            d_fig.add_trace(go.Bar(
+                x=sched["Year"], y=sched["Net debt"], name="Net debt",
+                marker=dict(color="rgba(212,176,120,0.42)",
+                            line=dict(color=CHART_GOLD, width=1)),
+            ))
+            d_fig.add_trace(go.Scatter(
+                x=sched["Year"], y=sched["Leverage (ND/EBITDA)"], name="Leverage (x)",
+                yaxis="y2", mode="lines+markers",
+                line=dict(color=CHART_JADE, width=2.4, shape="spline"),
+                marker=dict(size=7),
+            ))
+            d_fig.add_hline(y=6.5, yref="y2", line=dict(color=CHART_ROSE, width=1, dash="dash"),
+                            annotation_text="covenant ceiling",
+                            annotation_font=dict(size=9, color=CHART_ROSE))
+            style_chart(d_fig, height=400)
+            d_fig.update_layout(
+                margin=dict(l=8, r=64, t=42, b=14),
+                yaxis=dict(title_text=f"Net debt ({cur})", side="left",
+                           showgrid=True, gridcolor=CHART_GRID,
+                           tickfont=dict(family="JetBrains Mono, monospace",
+                                         size=10, color=CHART_MUTED)),
+                yaxis2=dict(title_text="Turns of EBITDA", overlaying="y", side="right",
+                            showgrid=False,
+                            tickfont=dict(family="JetBrains Mono, monospace",
+                                          size=10, color=CHART_MUTED)),
+            )
+            d_fig.update_xaxes(title_text="Year", dtick=1)
+            st.plotly_chart(d_fig, use_container_width=True)
+
+            st.subheader("What the answer actually depends on")
+            explain(
+                "The same deal, re-solved 25 times across a range of entry and exit "
+                "prices. Read this before the single IRR above it. If the answer swings "
+                "by twenty points across multiples that are all perfectly plausible, then "
+                "quoting one figure to a decimal place is false precision, and the honest "
+                "output is the whole grid."
+            )
+            centre_entry = float(lbo_res.assumptions.entry_multiple)
+            centre_exit = float(lbo_res.assumptions.exit_multiple)
+            entry_grid = [round(centre_entry + d, 2) for d in (-2, -1, 0, 1, 2)]
+            exit_grid = [round(centre_exit + d, 2) for d in (-2, -1, 0, 1, 2)]
+            with st.spinner("Re-solving across the grid..."):
+                grid = deals.lbo_sensitivity(lbo_res.assumptions,
+                                             "entry_multiple", entry_grid,
+                                             "exit_multiple", exit_grid)
+            st.plotly_chart(
+                sensitivity_heatmap(grid, "Entry multiple", "Exit multiple",
+                                    suffix="%", midpoint=deals.TARGET_IRR * 100),
+                use_container_width=True,
+            )
+            st.caption(
+                f"IRR %. Gold clears the {deals.TARGET_IRR * 100:.0f}% hurdle, red misses it."
+            )
+
+            with st.expander("Full projection"):
+                display = sched.copy()
+                for col in display.columns:
+                    if col != "Year" and "%" not in col and "coverage" not in col.lower() \
+                            and "Leverage" not in col:
+                        display[col] = display[col] / 1e6
+                st.dataframe(display.round(2), hide_index=True, use_container_width=True)
+                st.caption(f"Currency figures in millions of {cur}.")
+
+            st.warning(
+                "An LBO is an arithmetic identity dressed as a forecast. Every figure above "
+                "follows necessarily from assumptions you chose, and the two that matter "
+                "most — the exit multiple and the growth rate — are the two nobody can "
+                "know. Real deals also carry management fees, a revolver, an amortising "
+                "term loan with a different rate from the bond, PIK interest, dividend "
+                "recapitalisations and transaction costs at exit. This models a single "
+                "blended debt tranche with a full cash sweep, which is the teaching version."
+            )
+
+    # ==================================================================
+    # M&A — ACCRETION / DILUTION
+    # ==================================================================
+    with sub_ma:
+        st.subheader("Merger consequences")
+        explain(
+            "When one listed company buys another, the first question anyone asks is what "
+            "it does to earnings per share. The acquirer takes on the target's profits, but "
+            "pays for them with some mix of its own shares (which divides the profits among "
+            "more owners), cash (which gives up the interest that cash was earning) and new "
+            "debt (which costs interest). If the profits gained outweigh those three costs, "
+            "the deal is accretive. The more useful number is further down: how much "
+            "synergy has to materialise before the deal merely breaks even."
+        )
+
+        ma1, ma2 = st.columns(2)
+        with ma1:
+            acq_ticker = st.text_input("Acquirer", value=current_ticker or "MSFT",
+                                       key="ma_acq").upper().strip()
+        with ma2:
+            tgt_ticker = st.text_input("Target", value="ADBE", key="ma_tgt").upper().strip()
+
+        if st.button("Load both companies", key="ma_load"):
+            with st.spinner(f"Pulling {acq_ticker} and {tgt_ticker}..."):
+                try:
+                    st.session_state["ma_inputs"] = {
+                        "acq": get_deal_inputs(acq_ticker),
+                        "tgt": get_deal_inputs(tgt_ticker),
+                    }
+                except Exception as e:
+                    st.session_state.pop("ma_inputs", None)
+                    st.error(f"Couldn't load one of the two: {e}")
+
+        pair = st.session_state.get("ma_inputs")
+        if pair and (pair["acq"].get("ticker") != acq_ticker
+                     or pair["tgt"].get("ticker") != tgt_ticker):
+            pair = None
+
+        missing = []
+        if pair:
+            for side, label in (("acq", acq_ticker), ("tgt", tgt_ticker)):
+                for key in ("price", "shares", "net_income"):
+                    if not pair[side].get(key):
+                        missing.append(f"{label} {key.replace('_', ' ')}")
+        if pair and missing:
+            st.error(
+                "Missing " + ", ".join(missing) + ". Accretion is a ratio of earnings to "
+                "shares, so a company with no reported earnings or share count cannot be "
+                "modelled this way — try a profitable acquirer and target."
+            )
+            pair = None
+
+        if not pair:
+            st.info("Load an acquirer and a target to run the merger.")
+        else:
+            acq, tgt = pair["acq"], pair["tgt"]
+            cur = acq.get("currency", "USD")
+            render_tombstone([
+                (f"{acq_ticker} price", f"{acq['price']:,.2f}", ""),
+                (f"{tgt_ticker} price", f"{tgt['price']:,.2f}", ""),
+                (f"{acq_ticker} mkt cap", fmt_money(acq.get("market_cap"), cur), ""),
+                (f"{tgt_ticker} mkt cap", fmt_money(tgt.get("market_cap"), cur), ""),
+                ("Relative size",
+                 f"{tgt['market_cap'] / acq['market_cap'] * 100:.0f}%"
+                 if acq.get("market_cap") and tgt.get("market_cap") else "—", ""),
+            ])
+
+            st.markdown("###### Deal terms")
+            t1, t2, t3 = st.columns(3)
+            with t1:
+                premium = st.slider("Offer premium", 0, 100, 30, 1, format="%d%%",
+                                    key="ma_prem",
+                                    help="What you pay above the target's current price. "
+                                         "Control premiums usually land between 20% and 40%.") / 100.0
+                pct_stock = st.slider("Paid in stock", 0, 100, 50, 5, format="%d%%",
+                                      key="ma_stock") / 100.0
+            with t2:
+                pct_debt = st.slider("Funded by new debt", 0, 100, 0, 5, format="%d%%",
+                                     key="ma_debt",
+                                     help="The rest of the cash portion comes off the "
+                                          "balance sheet.") / 100.0
+                new_debt_rate = st.slider("Rate on new debt", 1.0, 15.0, 6.0, 0.25,
+                                          format="%.2f%%", key="ma_rate") / 100.0
+            with t3:
+                synergy_pct = st.slider(
+                    "Synergies, as % of target EBITDA", 0.0, 30.0, 8.0, 0.5,
+                    format="%.1f%%", key="ma_syn",
+                    help="Expressed against the target's own EBITDA so the number stays "
+                         "sane. Announced cost synergies in most sectors land between 3% "
+                         "and 10%; anything above that is a promise being made to get a "
+                         "deal approved.") / 100.0
+                ma_tax = st.slider("Tax rate", 0, 45, 25, 1, format="%d%%",
+                                   key="ma_taxrate") / 100.0
+
+            pct_cash = max(1.0 - pct_stock - pct_debt, 0.0)
+            st.caption(
+                f"Consideration: {pct_stock * 100:.0f}% stock · {pct_cash * 100:.0f}% cash "
+                f"on hand · {pct_debt * 100:.0f}% new debt."
+            )
+
+            if st.button("Run the merger", type="primary", key="ma_run"):
+                m = deals.MergerAssumptions(
+                    acquirer=acq_ticker, target=tgt_ticker,
+                    acq_price=acq["price"], acq_shares=acq["shares"],
+                    acq_net_income=acq["net_income"],
+                    acq_ebitda=acq.get("ebitda") or 0.0,
+                    acq_net_debt=acq.get("net_debt") or 0.0,
+                    tgt_price=tgt["price"], tgt_shares=tgt["shares"],
+                    tgt_net_income=tgt["net_income"],
+                    tgt_ebitda=tgt.get("ebitda") or 0.0,
+                    tgt_net_debt=tgt.get("net_debt") or 0.0,
+                    premium=premium, pct_cash=pct_cash, pct_stock=pct_stock,
+                    pct_debt=pct_debt,
+                    synergies=(tgt.get("ebitda") or 0.0) * synergy_pct,
+                    new_debt_rate=new_debt_rate, tax_rate=ma_tax,
+                )
+                st.session_state["ma_result"] = deals.run_merger(m)
+                st.session_state["ma_currency"] = cur
+
+            ma_res = st.session_state.get("ma_result")
+            if ma_res is None:
+                st.info("Set the terms and select **Run the merger**.")
+            else:
+                cur = st.session_state.get("ma_currency", "USD")
+                accretion = ma_res["accretion"]
+                render_verdict(
+                    "Year-one EPS impact",
+                    f"{accretion * 100:+.1f}%",
+                    tone="bull" if accretion > 0.01 else "bear" if accretion < -0.01 else "neutral",
+                    note=deals.merger_verdict(ma_res),
+                    right=f"{ma_res['pro_forma_eps']:.2f}",
+                    right_sub="pro forma EPS",
+                )
+
+                render_tombstone([
+                    ("Offer price", f"{ma_res['offer_price']:,.2f}", ""),
+                    ("Equity value", fmt_money(ma_res["equity_purchase_price"], cur), ""),
+                    ("EV paid", fmt_money(ma_res["enterprise_purchase_price"], cur), ""),
+                    ("EV/EBITDA paid",
+                     f"{ma_res['ev_ebitda_paid']:.1f}x"
+                     if np.isfinite(ma_res["ev_ebitda_paid"]) else "—", ""),
+                    ("Target owns",
+                     f"{ma_res['target_ownership_pct']:.1f}%", ""),
+                ])
+
+                st.subheader("Where the earnings go")
+                explain(
+                    "Standalone profit, then everything the deal adds and everything it "
+                    "costs. The last bar is the combined profit — but it now has to be "
+                    "shared among more shares, which is why the bridge alone does not tell "
+                    "you whether earnings per share went up."
+                )
+                m = ma_res["assumptions"]
+                st.plotly_chart(
+                    waterfall_chart(
+                        [f"{m.acquirer} net income", f"{m.target} net income",
+                         "Synergies", "New interest", "Foregone interest", "Pro forma"],
+                        [m.acq_net_income, m.tgt_net_income,
+                         ma_res["synergy_contribution"], -ma_res["new_interest"],
+                         -ma_res["foregone_interest"], ma_res["pro_forma_net_income"]],
+                        f"Net income ({cur})"),
+                    use_container_width=True,
+                )
+
+                b1, b2, b3 = st.columns(3)
+                b1.metric("Standalone EPS", f"{ma_res['standalone_eps']:.2f}")
+                b2.metric("Pro forma EPS", f"{ma_res['pro_forma_eps']:.2f}",
+                          delta=f"{accretion * 100:+.1f}%")
+                b3.metric("Breakeven synergies",
+                          fmt_money(ma_res["breakeven_synergies"], cur),
+                          help="The annual pre-tax synergy that makes this deal exactly "
+                               "EPS-neutral. Argue about this number, not about the "
+                               "accretion percentage.")
+
+                st.subheader("Premium against consideration mix")
+                explain(
+                    "How accretion moves as you pay more, and as you shift between paying "
+                    "in stock and paying in cash. The pattern is the lesson: if the "
+                    "acquirer's shares are expensive relative to what it is buying, stock "
+                    "is the cheap currency, and the whole column stays gold. If they are "
+                    "not, every extra share issued makes it worse."
+                )
+                with st.spinner("Re-running the merger across the grid..."):
+                    ma_grid = deals.merger_sensitivity(
+                        m, [0.0, 0.15, 0.30, 0.45, 0.60], [0.0, 0.25, 0.5, 0.75, 1.0])
+                ma_grid.index = [round(i * 100, 1) for i in ma_grid.index]
+                ma_grid.columns = [round(c * 100, 1) for c in ma_grid.columns]
+                st.plotly_chart(
+                    sensitivity_heatmap(ma_grid, "Premium %", "Paid in stock %",
+                                        suffix="%", midpoint=0.0),
+                    use_container_width=True,
+                )
+                st.caption("EPS accretion %. Gold is accretive, red is dilutive, "
+                           "the dark band is neutral.")
+
+                st.warning(
+                    "Year-one EPS is the weakest good question in M&A. It says nothing "
+                    "about whether the price was right, ignores the amortisation of "
+                    "acquired intangibles, assumes synergies arrive on schedule and at no "
+                    "cost, and treats a cash balance as free money. Deals that are accretive "
+                    "on day one destroy value all the time; the discipline is whether the "
+                    "return on the capital invested beats the cost of it."
+                )
+
+    # ==================================================================
+    # TRADING COMPARABLES
+    # ==================================================================
+    with sub_comps:
+        st.subheader("Comparable companies")
+        explain(
+            "If you want to know what a company is worth, look at what the market pays for "
+            "similar companies. Take the ratio of price to profit for each peer, find the "
+            "middle of the range, and apply it to this company's profit. Do it with several "
+            "different ratios and you get a range of values rather than one false answer — "
+            "which is what the chart below draws."
+        )
+
+        comp_target = st.text_input("Company to value", value=current_ticker or "CRM",
+                                    key="comp_ticker").upper().strip()
+        peer_text = st.text_area(
+            "Peer set", value="MSFT, ORCL, SAP, ADBE, NOW, WDAY, INTU, TEAM",
+            key="comp_peers",
+            help="Companies that compete for the same customers with the same business "
+                 "model. A peer set assembled by market capitalisation instead of by "
+                 "business is the single most common way comps mislead.",
+        )
+
+        if st.button("Build the comp set", type="primary", key="comp_run"):
+            peer_list = tuple(sorted({t.strip().upper() for t in peer_text.replace("\n", ",").split(",")
+                                      if t.strip() and t.strip().upper() != comp_target}))
+            if len(peer_list) < 3:
+                st.error("A median off fewer than three peers is not a median. Add more names.")
+            else:
+                with st.spinner(f"Pulling {len(peer_list)} peers..."):
+                    try:
+                        target_data = get_deal_inputs(comp_target)
+                        peer_frame = get_peer_multiples(peer_list)
+                    except Exception as e:
+                        st.error(f"Couldn't build the comp set: {e}")
+                        peer_frame = pd.DataFrame()
+                        target_data = None
+                if target_data and not peer_frame.empty:
+                    target_data["net_debt"] = target_data.get("net_debt") or 0.0
+                    st.session_state["comps_target"] = target_data
+                    st.session_state["comps_peers"] = peer_frame
+                    st.session_state["comps_result"] = deals.build_comps(target_data, peer_frame)
+                    st.session_state["comps_requested"] = len(peer_list)
+                elif target_data:
+                    st.error("None of those peers returned usable multiples.")
+
+        comps_res = st.session_state.get("comps_result")
+        if comps_res is None:
+            st.info("Pick a company and a peer set, then select **Build the comp set**.")
+        else:
+            target_data = st.session_state["comps_target"]
+            peer_frame = st.session_state["comps_peers"]
+            requested = st.session_state.get("comps_requested", len(peer_frame))
+            cur = target_data.get("currency", "USD")
+
+            if len(peer_frame) < requested:
+                st.warning(
+                    f"{len(peer_frame)} of {requested} peers returned usable data. A comp "
+                    "set that quietly shrinks moves the median, so the missing names are "
+                    "worth knowing about."
+                )
+
+            field = comps_res["football_field"]
+            if field.empty:
+                st.error(deals.comps_verdict(comps_res))
+            else:
+                render_verdict(
+                    "Peer-implied value",
+                    f"{comps_res['blended_value']:,.2f}",
+                    tone=("bull" if comps_res["upside"] > 0.15
+                          else "bear" if comps_res["upside"] < -0.15 else "neutral"),
+                    note=deals.comps_verdict(comps_res),
+                    right=f"{comps_res['upside'] * 100:+.0f}%",
+                    right_sub="vs market",
+                )
+
+                st.subheader("Football field")
+                explain(
+                    "One bar per valuation method, spanning what the cheaper quarter and "
+                    "the dearer quarter of the peer set imply. The vertical line is what "
+                    "the market charges today. Where the bars agree, the range is "
+                    "meaningful; where they scatter, the peer set is not really comparable "
+                    "and the median is averaging different businesses."
+                )
+                ff = go.Figure()
+                for _, row in field.iterrows():
+                    ff.add_trace(go.Scatter(
+                        x=[row["Low"], row["High"]], y=[row["Method"], row["Method"]],
+                        mode="lines", line=dict(color="rgba(212,176,120,0.55)", width=16),
+                        name=row["Method"], showlegend=False,
+                        hovertemplate=(f"{row['Method']}<br>25th {row['Low']:,.2f}"
+                                       f"<br>median {row['Mid']:,.2f}"
+                                       f"<br>75th {row['High']:,.2f}<extra></extra>"),
+                    ))
+                    ff.add_trace(go.Scatter(
+                        x=[row["Mid"]], y=[row["Method"]], mode="markers",
+                        marker=dict(symbol="line-ns", size=20,
+                                    line=dict(color="#F4F1EA", width=2)),
+                        showlegend=False, hoverinfo="skip",
+                    ))
+                ff.add_vline(
+                    x=comps_res["current_price"],
+                    line=dict(color=CHART_JADE, width=1.6, dash="dash"),
+                    annotation_text=f"market {comps_res['current_price']:,.2f}",
+                    annotation_font=dict(size=10, color=CHART_JADE),
+                )
+                style_chart(ff, height=110 + 58 * len(field), show_legend=False)
+                ff.update_layout(margin=dict(l=8, r=20, t=46, b=14), hovermode="closest")
+                # Plotly stacks the first category at the bottom; reversing
+                # puts EV/Revenue at the top so the field reads in the same
+                # order the methods are listed everywhere else.
+                ff.update_yaxes(side="left", showgrid=False, automargin=True,
+                                autorange="reversed")
+                ff.update_xaxes(title_text=f"Implied share price ({cur})", showspikes=False)
+                st.plotly_chart(ff, use_container_width=True)
+
+                st.subheader("The peer set")
+                explain(
+                    "Every peer, every multiple. Blanks are not missing data so much as "
+                    "meaningless data — a company with negative EBITDA has no EV/EBITDA, "
+                    "and letting one into the median would drag the whole range toward a "
+                    "number nobody would pay."
+                )
+                st.dataframe(peer_frame.round(2), hide_index=True, use_container_width=True)
+                st.dataframe(comps_res["stats"].round(2), hide_index=True,
+                             use_container_width=True)
+                st.caption(
+                    "'Target' is where this company trades on the same multiple today. "
+                    "Sitting above the 75th percentile on every line is not automatically "
+                    "expensive — it is the question the operating analysis answers."
+                )
+
+    # ==================================================================
+    # VALUE CREATION
+    # ==================================================================
+    with sub_opco:
+        st.subheader("Operating performance")
+        explain(
+            "Before deciding what a company is worth, work out how well it is actually "
+            "run. This reads the last few years of accounts: is revenue growing, are "
+            "margins widening or being squeezed, how long does cash sit trapped in unpaid "
+            "invoices and unsold stock, and does the profit on the income statement ever "
+            "turn into real money. Then it prices the gap to the industry — what closing "
+            "it would be worth."
+        )
+
+        opco_ticker = st.text_input("Company", value=current_ticker or "NKE",
+                                    key="opco_ticker").upper().strip()
+        oc1, oc2 = st.columns(2)
+        with oc1:
+            peer_margin = st.number_input(
+                "Peer EBITDA margin %", 0.0, 80.0, 20.0, 0.5, key="opco_peer_margin",
+                help="What good looks like in this industry. The margin lever below is "
+                     "priced against this number.")
+        with oc2:
+            peer_growth_input = st.number_input(
+                "Peer revenue growth %", -20.0, 60.0, 6.0, 0.5, key="opco_peer_growth")
+
+        if st.button("Read the accounts", type="primary", key="opco_run"):
+            with st.spinner(f"Pulling {opco_ticker} statements..."):
+                try:
+                    statements = get_financial_statements(opco_ticker)
+                    history = deals.operating_analysis(
+                        statements["income"], statements["balance"], statements["cashflow"])
+                except Exception as e:
+                    history = pd.DataFrame()
+                    st.error(f"Couldn't read the statements: {e}")
+            if history.empty:
+                st.session_state.pop("opco_history", None)
+                st.error(
+                    f"No usable annual statements came back for {opco_ticker}. The free "
+                    "data source covers listed companies patchily outside the US, and "
+                    "financial firms report on a different chart of accounts entirely."
+                )
+            else:
+                st.session_state["opco_history"] = history
+                st.session_state["opco_ticker_loaded"] = opco_ticker
+
+        history = st.session_state.get("opco_history")
+        if history is None:
+            st.info("Pick a company and select **Read the accounts**.")
+        else:
+            latest = history.iloc[-1]
+            render_verdict(
+                "Operating read",
+                st.session_state.get("opco_ticker_loaded", opco_ticker),
+                tone="neutral",
+                note=deals.operating_verdict(history),
+                right=(f"{latest['EBITDA margin %']:.1f}%"
+                       if pd.notna(latest.get("EBITDA margin %")) else "—"),
+                right_sub="EBITDA margin",
+            )
+
+            st.subheader("Margins and growth")
+            explain(
+                "Margins are the story of pricing power; growth is the story of demand. "
+                "Widening margins on flat revenue is a cost programme. Falling margins on "
+                "fast growth is a company buying its revenue. Both are fine — they are "
+                "just different companies to own."
+            )
+            m_fig = go.Figure()
+            for column, colour in (("Gross margin %", "rgba(255,255,255,0.35)"),
+                                   ("EBITDA margin %", CHART_GOLD),
+                                   ("Operating margin %", CHART_JADE),
+                                   ("Net margin %", "#8FB8E8")):
+                if column in history and history[column].notna().any():
+                    m_fig.add_trace(go.Scatter(
+                        x=history["Year"], y=history[column], name=column.replace(" %", ""),
+                        mode="lines+markers", line=dict(width=2.2, color=colour, shape="spline"),
+                        marker=dict(size=7),
+                    ))
+            style_chart(m_fig, height=380)
+            m_fig.update_xaxes(title_text="Year", dtick=1)
+            m_fig.update_yaxes(title_text="% of revenue", title_standoff=8)
+            m_fig.update_layout(margin=dict(l=8, r=84, t=42, b=14))
+            st.plotly_chart(m_fig, use_container_width=True)
+
+            st.subheader("Cash conversion cycle")
+            explain(
+                "Days between paying your suppliers and being paid by your customers. "
+                "Every day in that gap is cash the business has to fund out of its own "
+                "pocket, which for a leveraged company is cash that cannot service debt. "
+                "Shortening it releases money once, and it is one of the first things a "
+                "new owner goes after."
+            )
+            c_fig = go.Figure()
+            for column, colour in (("DSO", "rgba(212,176,120,0.65)"),
+                                   ("DIO", "rgba(143,184,232,0.6)"),
+                                   ("DPO", "rgba(240,97,111,0.55)")):
+                if column in history and history[column].notna().any():
+                    c_fig.add_trace(go.Bar(x=history["Year"], y=history[column], name=column,
+                                           marker=dict(color=colour)))
+            if history["Cash conversion cycle"].notna().any():
+                c_fig.add_trace(go.Scatter(
+                    x=history["Year"], y=history["Cash conversion cycle"],
+                    name="Cycle", mode="lines+markers",
+                    line=dict(color="#F4F1EA", width=2.4, shape="spline"),
+                    marker=dict(size=8),
+                ))
+            style_chart(c_fig, height=380)
+            c_fig.update_layout(barmode="group", margin=dict(l=8, r=74, t=42, b=14))
+            c_fig.update_xaxes(title_text="Year", dtick=1)
+            c_fig.update_yaxes(title_text="Days", title_standoff=8)
+            st.plotly_chart(c_fig, use_container_width=True)
+
+            st.subheader("Value creation levers")
+            explain(
+                "'Improve margins' is a slide. This turns each lever into a number: what "
+                "closing the gap to the industry would add to profit, and what that profit "
+                "is worth at the multiple you would sell on. That is the figure that has "
+                "to justify the cost and the disruption of going after it."
+            )
+            levers = deals.value_creation_levers(
+                history, peer_margin, peer_growth_input,
+                exit_multiple=float(st.session_state.get("lbo_exit", 9.0)))
+            st.session_state["opco_levers"] = levers
+            if levers.empty:
+                st.info("Not enough of the accounts came back to price the levers.")
+            else:
+                show = levers.copy()
+                show["EBITDA impact"] = show["EBITDA impact"].map(lambda v: fmt_money(v))
+                show["Enterprise value impact"] = show["Enterprise value impact"].map(
+                    lambda v: fmt_money(v))
+                st.dataframe(show, hide_index=True, use_container_width=True)
+                st.caption(
+                    f"Priced at {float(st.session_state.get('lbo_exit', 9.0)):.1f}x, the "
+                    "exit multiple set on the LBO tab."
+                )
+
+            with st.expander("Full operating history"):
+                st.dataframe(history.round(2), hide_index=True, use_container_width=True)
+                st.caption(
+                    "ROIC uses a flat 25% tax on operating profit rather than the cash "
+                    "rate the company actually paid, and invested capital is equity plus "
+                    "debt less cash. Both are conventions, and both are wrong in the same "
+                    "direction for every company shown, which is what makes the comparison "
+                    "useful even where the level is not exact."
+                )
+
+    # ==================================================================
+    # INVESTMENT MEMO
+    # ==================================================================
+    with sub_memo:
+        st.subheader("Investment memo")
+        explain(
+            "The document a deal team actually circulates. It does not generate an opinion "
+            "out of nothing — it assembles the four models on the other tabs into the order "
+            "a partner reads them: the recommendation first, then the case for, then the "
+            "case against, then the evidence, then what is still unknown. Run whichever "
+            "tabs you want included and they appear here."
+        )
+
+        lbo_res = st.session_state.get("lbo_result")
+        comps_res = st.session_state.get("comps_result")
+        history = st.session_state.get("opco_history")
+        levers = st.session_state.get("opco_levers")
+
+        available = [
+            ("LBO returns", lbo_res is not None),
+            ("Comparable companies", comps_res is not None),
+            ("Operating history", history is not None and not history.empty),
+        ]
+        chips = " · ".join(
+            f"{'✓' if ok else '—'} {name}" for name, ok in available
+        )
+        st.caption(f"Sections available: {chips}")
+
+        if not any(ok for _, ok in available):
+            st.info(
+                "Nothing to assemble yet. Run the LBO, the comp set or the operating "
+                "analysis and the memo builds itself from whatever is there."
+            )
+        else:
+            memo_company = st.text_input(
+                "Company name for the memo",
+                value=((lbo_res.assumptions.company if lbo_res else None)
+                       or st.session_state.get("opco_ticker_loaded")
+                       or current_ticker or "Target"),
+                key="memo_company",
+            )
+
+            if st.button("Assemble the memo", type="primary", key="memo_run"):
+                snapshot = (st.session_state.get("comps_target")
+                            or st.session_state.get("lbo_inputs") or {})
+                rec = deals.recommendation(lbo_res, comps_res, history)
+                st.session_state["memo_rec"] = rec
+                st.session_state["memo_text"] = deals.build_memo(
+                    memo_company, snapshot, lbo_res, comps_res, history, levers, rec)
+
+            memo_text = st.session_state.get("memo_text")
+            rec = st.session_state.get("memo_rec")
+            if memo_text is None:
+                st.info("Select **Assemble the memo**.")
+            else:
+                render_stamp(
+                    rec["verdict"].upper(), rec["tone"],
+                    sub=f"score {rec['score']:+d} · {len(rec['supports'])} for "
+                        f"· {len(rec['concerns'])} against",
+                )
+                st.markdown(
+                    f'<div class="tv-memo">\n\n{memo_text}\n\n</div>',
+                    unsafe_allow_html=True,
+                )
+                st.download_button(
+                    "Download the memo",
+                    data=memo_text,
+                    file_name=f"investment_memo_{re.sub(r'[^A-Za-z0-9]+', '_', memo_company)}.md",
+                    mime="text/markdown",
+                    key="memo_dl",
+                )
+                st.warning(
+                    "The recommendation is a scorecard, not a judgement. It weighs six "
+                    "modelled tests — returns against a hurdle, how much of those returns "
+                    "came from assuming a higher exit multiple, covenant headroom, value "
+                    "against peers, cash conversion and return on capital — and the "
+                    "thresholds are visible in deals.py so you can disagree with them "
+                    "specifically. What it cannot see is the half of a real diligence "
+                    "process that decides most deals: the management team, the customer "
+                    "contracts, the litigation, and whether the market this company sells "
+                    "into still exists in five years. The questions at the end of the memo "
+                    "are the ones the numbers cannot answer."
+                )
+
+
+
 with tab_support:
     # ----------------------------------------------------------------------
     # SUPPORT
@@ -6213,6 +7552,8 @@ st.markdown(
   <span class="tv-sb-item">{f"Loaded <b>{html_lib.escape(_status_ticker)}</b>" if _status_ticker else "No instrument loaded"}</span>
   <span class="tv-sb-sep"></span>
   <span class="tv-sb-item">Explain {'ON' if st.session_state.get('explain_mode', True) else 'OFF'}</span>
+  <span class="tv-sb-sep"></span>
+  <span class="tv-sb-item">{(time.perf_counter() - _render_start) * 1000:.0f}ms</span>
   <span class="tv-sb-spacer"></span>
   <span class="tv-sb-item tv-sb-time">{datetime.now().strftime('%H:%M:%S')}</span>
 </div>

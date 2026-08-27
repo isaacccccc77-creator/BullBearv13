@@ -1,9 +1,15 @@
 # Tickveil
 
-A market-analysis terminal built in Streamlit: price data and technical
-indicators, fundamentals and risk, a transparent composite score with its own
-honest backtest, a trade planner, a journal, watchlist scanning and news
-sentiment — with the method behind every number shown alongside it.
+A market-analysis terminal built in Streamlit, in three parts. The **market
+desk** covers price data and technical indicators, fundamentals and risk, a
+transparent composite score with its own honest backtest, a trade planner, a
+journal, watchlist scanning and news sentiment. The **Quant Desk** runs
+cointegration pairs, Value at Risk and portfolio optimisation. The **Deal
+Room** runs the models a banking or private-equity desk runs: a leveraged
+buyout, an M&A accretion/dilution analysis, trading comparables, an operating
+value-creation study, and the investment memo that assembles them.
+
+The method behind every number is shown alongside it.
 
 Nothing in the app predicts prices or recommends trades. That constraint is
 deliberate and it is enforced in the copy throughout: the indicator lean is a
@@ -82,10 +88,12 @@ written `0600`, with the mode set at creation rather than chmod-ed afterwards.
 | `test_scoring.py` | Mathematical properties of the composite score, including p-value calibration. |
 | `test_support.py` | Donation-link validation: https only, host-pinned, injection-proof. |
 | `test_quant.py` | The three quant models: null calibration, coverage, optimiser properties. |
+| `test_deals.py` | The deal models: identities, closed-form cases, monotonicities. |
 | `storage.py` | Persistence. JSON files or Postgres, chosen by `DATABASE_URL`. |
 | `scoring.py` | The composite score. No Streamlit import, so the maths is testable directly. |
 | `support.py` | Donation links. Validates and host-pins them; handles no money itself. |
 | `quant.py` | Cointegration, VaR and portfolio optimisation. No Streamlit import. |
+| `deals.py` | LBO, M&A, comparables, value creation, memo. No Streamlit import. |
 | `.streamlit/config.toml` | Base theme (dark, champagne primary). |
 | `requirements.txt` | Dependencies. |
 
@@ -261,6 +269,128 @@ message would explain. `align_prices` normalises, de-duplicates and
 inner-joins; the UI names the two real causes (recent listings, mismatched
 exchange calendars) if the overlap is still too short.
 
+## The Deal Room
+
+Five models that a banking analyst or a private-equity associate would build
+by hand, each shipped with the test that says whether to believe it. They
+share one tab with sub-tabs, for the same reason the Quant Desk does: they
+answer five parts of one question — what is it worth, what would it return,
+what does buying it do to us, how well is it run, and do we do the deal.
+
+The mathematics lives in `deals.py`, which imports no Streamlit, so every
+claim below is checkable by running `python test_deals.py`. That separation
+matters more here than anywhere else in the codebase: these models fail
+*silently*. An LBO that forgets to tax interest does not crash, it returns a
+plausible IRR that is wrong by several points. So the tests assert properties
+that must hold — identities, closed-form cases, monotonicities — rather than
+snapshots of whatever the code produced on the day it was written.
+
+Two real bugs were caught that way while building it. The value-creation
+bridge failed to reconcile by exactly the transaction fee, which turned out to
+be the test asserting the wrong identity — the bridge reconciles to what the
+sponsor actually gained, fees included, not to the pre-fee entry equity. And
+sources-and-uses double-counted the target's existing net debt, listing both
+enterprise value and the debt to be refinanced as separate uses; the error is
+invisible whenever the target happens to be debt-free, which the default
+assumptions were.
+
+### Leveraged buyout
+
+Year-by-year projection, a full cash sweep against a single blended debt
+tranche, then exit.
+
+**The order of operations is the thing hand-built LBOs get wrong.** Interest
+is charged on the opening balance of each year, because the sweep happens with
+cash the business has not generated yet. Tax is applied *after* interest,
+which is the entire financial point of the structure — the debt shield is
+worth interest times the tax rate every year, and a model that taxes EBIT
+instead quietly deletes it. There is a test for exactly this: raising the
+interest rate must cost less net income than the extra interest, and the
+difference must equal the shield to floating-point precision.
+
+**The value creation bridge is the output that matters.** It decomposes the
+sponsor's gain into EBITDA growth, multiple change, debt paydown and fees, and
+it is an exact identity — `(Mx·Ex − Dx) − (Me·Ee − De)` splits into
+`Me·(Ex−Ee) + Ex·(Mx−Me) + (De−Dx)`, with fees as their own negative bar. If
+the multiple-change bar is the tall one, the return was an assumption about
+the exit market rather than anything the sponsor did, and the verdict says so
+in those words.
+
+**The exit multiple defaults to the entry multiple.** Assuming you sell higher
+than you bought is the easiest way to manufacture an IRR, so the base case
+refuses to do it by default and the sensitivity grid re-solves the whole model
+25 times so the range is visible before the point estimate is.
+
+### M&A accretion/dilution
+
+Standalone versus pro forma EPS, and what has to go right for the deal to pay
+for itself.
+
+**Every financing cost is taken after tax.** Interest is deductible, so a
+pre-tax comparison overstates the drag by the tax rate. Tested directly
+against the closed form.
+
+**Breakeven synergies is the useful number, not accretion.** "Is 3% accretion
+good" has no answer. "Is $180m of annual cost synergy credible in this
+industry, when it is 26% of the target's entire EBITDA" does. The model solves
+for the synergy level that makes the deal exactly EPS-neutral, and the test
+feeds that answer back in and asserts the result is neutral to nine decimal
+places.
+
+**The identity case is a test.** Two companies with the same P/E, no premium,
+no synergies, all stock: the acquirer issues exactly enough shares to buy
+exactly the earnings it dilutes, so accretion must be exactly zero. It is.
+
+### Trading comparables
+
+Peer multiples, their quartiles, and the share price each one implies — drawn
+as a football field.
+
+**Meaningless multiples are dropped, not winsorised.** A negative EV/EBITDA is
+not a cheap company, it is a company with negative EBITDA, and letting one
+into a median drags the whole range toward a number nobody would pay. A peer
+whose multiple is meaningless is not a peer *for that multiple*, so it is
+removed from that column and kept in the others.
+
+**Quartiles rather than min-to-max**, because the extremes of a ten-name comp
+set are almost always a story about one company rather than about the
+industry. And a multiple with fewer than three clean peers is skipped
+entirely — a quartile off two observations is theatre.
+
+### Value creation
+
+Reads the last few years of accounts into the operating history a deal team
+looks at: growth, margins, working capital days, ROIC and cash conversion.
+Anything the statements do not support is left as NaN rather than defaulted to
+zero, because a cash conversion cycle of zero days is a claim and it is
+usually a false one.
+
+**Levers are priced, not listed.** "Improve margins" becomes a point of margin
+times revenue times the exit multiple, which is the number that has to justify
+the cost of going after it.
+
+**A company already ahead of its peers has no lever.** Showing that gap as a
+negative uplift reads as an opportunity to get worse, so the impact is floored
+at zero and the row says what the gap actually is — a premium that may or may
+not be durable, not a target to regress to.
+
+### Investment memo
+
+Assembles whatever the other four tabs have produced, in the order a partner
+reads: recommendation, case for, case against, evidence, then what is still
+unknown.
+
+**The recommendation is a scorecard and its thresholds are in the source.** It
+weighs returns against a hurdle, how much of those returns came from multiple
+expansion, covenant headroom, value against peers, cash conversion and return
+on capital. Concerns are listed alongside supports — a memo that lists only
+supporting evidence is a pitch, not an analysis — and there is a test asserting
+that a bad deal comes back "Pass".
+
+**What it cannot see is the half of diligence that decides most deals**: the
+management team, the customer contracts, the litigation, whether the market
+still exists in five years. Those are the six questions the memo ends on.
+
 ## Donations
 
 Tickveil is free. Every feature, for everyone, with nothing held back — the
@@ -347,8 +477,28 @@ MSFT with nothing flagging the mismatch. One instrument, set in one place,
 read by every tab; tabs that follow it say so with a context chip.
 
 Tabs are ordered by kind: instrument-scoped views (Analysis, Fundamentals,
-Factor Score, Quant Desk), then tools (Trade Setup, Journal, Watchlist, Daily
-Digest), then reference (Multi-Asset, Calendar, Settings). Market News was removed as a
+Factor Score), then the two model desks (Quant Desk, Deal Room), then tools
+(Trade Setup, Journal, Watchlist, Daily Digest), then reference (Multi-Asset,
+Calendar, Settings).
+
+### The rail is near its limit
+
+Thirteen tabs is one row too many on a laptop, and it costs more than looks.
+Streamlit re-executes the entire script on every interaction, and `st.tabs`
+renders *every* tab body, not just the visible one — all thirteen run on every
+click. The status bar now reports the real per-rerun cost so the number is not
+a guess.
+
+Two things keep that bearable today, and both are deliberate. Everything
+expensive on the Quant Desk and in the Deal Room is behind a button and cached
+in session state, so an unopened model costs a function call rather than a
+solve. And the heavy fetches are `@st.cache_data`.
+
+The next structural step, when the rail grows again, is a desk switcher above
+the tabs — Markets, Quant, Deals, Workspace — with the tab bodies guarded so
+only the active desk executes. That turns "every screen runs on every click"
+into "one desk runs", and it is the change to make before adding a fourteenth
+tab rather than after. Market News was removed as a
 top-level tab — it held one collapsed accordion on an otherwise empty screen —
 and now sits under the ticker-specific news in Analysis.
 
