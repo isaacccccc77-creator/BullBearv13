@@ -81,9 +81,11 @@ written `0600`, with the mode set at creation rather than chmod-ed afterwards.
 | `test_storage.py` | Same contract asserted against both storage backends, plus the migration. |
 | `test_scoring.py` | Mathematical properties of the composite score, including p-value calibration. |
 | `test_support.py` | Donation-link validation: https only, host-pinned, injection-proof. |
+| `test_quant.py` | The three quant models: null calibration, coverage, optimiser properties. |
 | `storage.py` | Persistence. JSON files or Postgres, chosen by `DATABASE_URL`. |
 | `scoring.py` | The composite score. No Streamlit import, so the maths is testable directly. |
 | `support.py` | Donation links. Validates and host-pins them; handles no money itself. |
+| `quant.py` | Cointegration, VaR and portfolio optimisation. No Streamlit import. |
 | `.streamlit/config.toml` | Base theme (dark, champagne primary). |
 | `requirements.txt` | Dependencies. |
 
@@ -112,6 +114,13 @@ professional scans and a strip anyone can read.
 data source and its delay, the ticker currently loaded, whether explain mode
 is on, and the render time. No fake "LIVE" indicator over a 15-minute-delayed
 free feed.
+
+**Every model reports its own failure test.** A terminal gives you the number;
+the Quant Desk gives you the number and the evidence that it means anything —
+a bootstrapped p-value beside the naive one, a Kupiec coverage test beside the
+VaR, an out-of-sample column beside every optimised portfolio. Where the
+honest answer is "this added nothing you could rely on", that is what the card
+says.
 
 ## The composite score
 
@@ -163,6 +172,94 @@ Bands are named for what the reading *is* — "strongly positive conditions" —
 never BUY or SELL. A score built from four correlated technical indicators over
 a six-month window is nowhere near strong enough evidence to issue an
 instruction, and the rest of the app does not issue them either.
+
+## The Quant Desk
+
+Three models that a desk would actually run, each with the test that says
+whether to believe it. They share a tab with sub-tabs rather than three
+top-level entries, because they answer three parts of one question — is there
+an edge, what can it lose, and how much of each thing to hold.
+
+All three live in `quant.py`, which imports no Streamlit, so every claim below
+is checkable by running `python test_quant.py`.
+
+### Statistical arbitrage
+
+Engle–Granger cointegration on log prices, then a rolling z-score of the
+residual spread, then a mechanical backtest of the entry/exit/stop rule.
+
+**The critical values are the whole story.** The tempting implementation runs
+an ADF test on the OLS residual and reads off a standard ADF p-value. That is
+wrong, and not subtly: the residual has been *chosen* by least squares to look
+as stationary as possible, so it clears the ADF bar far more often than chance.
+Simulated on independent random walks — pairs with no relationship whatsoever —
+at a nominal 5%:
+
+| Critical values used | False-positive rate |
+| --- | --- |
+| Standard ADF | **11.0%** |
+| Engle–Granger null (simulated here) | 4.0% |
+
+Plain ADF calls unrelated stocks cointegrated more than twice as often as it
+claims to. `EG_NULL_QUANTILES` is 40,000 simulations of the full
+regress-then-test procedure; the 5% value comes out at −3.333 against −3.34 in
+the published tables, which is the check that the simulation is right.
+
+**Half-life comes from an Ornstein–Uhlenbeck fit,** −ln 2 ⁄ λ, and is shown
+next to the p-value because a pair can be statistically cointegrated and still
+take eight months to converge, which is not a trade.
+
+**The backtest lags the signal by one day.** Deciding at today's close on
+today's z-score is a look-ahead that flatters every mean-reversion strategy
+ever written.
+
+### Value at Risk
+
+Historical, Gaussian and Cornish–Fisher VaR side by side, plus Expected
+Shortfall, then a Kupiec test on whether the number ever held.
+
+**Cornish–Fisher is guarded, not trusted.** The expansion adjusts the normal
+quantile for skew and kurtosis, and on fat tails it is supposed to give a
+*larger* loss estimate than Gaussian. Outside a limited region of (skew,
+kurtosis) it stops being monotone and quietly returns a *smaller* one — a risk
+model that gets safer as the tails get worse. `cornish_fisher_z` returns a
+validity flag alongside the value; when the expansion is outside its valid
+region the UI falls back to the historical quantile and says so.
+
+**Backtesting is the point.** A 95% VaR should be breached on about 5 days in
+100. The Kupiec proportion-of-failures test reports whether the observed
+breach count is consistent with that, and the verdict names the direction —
+understating risk is the dangerous failure, being too cautious is merely
+expensive.
+
+**√t scaling is labelled as the assumption it is.** Multi-day VaR assumes
+independent days; volatility clusters instead, so multi-day figures understate
+risk exactly during the crises they exist to measure.
+
+### Portfolio optimiser
+
+Maximum Sharpe, minimum variance, risk parity and equal weight, long-only,
+solved by SLSQP, plotted against the efficient frontier.
+
+**Every mix is scored on a holdout it never saw.** The last 30% of the history
+is carved off before fitting. Mean-variance optimisation is an error maximiser
+— it cannot tell a genuinely superior stock from one whose average return was
+flattered by luck, so it concentrates into whichever had the most fortunate
+estimate. In-sample-only numbers would make it look excellent every single
+time.
+
+**The verdict compares against equal weight, and stays neutral when it should.**
+Beating the naive benchmark by 0.02 Sharpe out of sample is not beating it. The
+card only turns green when the margin clears 0.15; below that it says the
+optimisation added nothing you could rely on, which is the common outcome and
+the honest one.
+
+**Prices are aligned on calendar dates before anything else happens.** Joining
+raw indices from different symbols produces a mostly-NaN matrix that `dropna()`
+empties completely — the optimiser then returns nothing, for reasons no error
+message would explain. `align_prices` normalises, de-duplicates and
+inner-joins; the UI names the two real causes (recent listings, mismatched
+exchange calendars) if the overlap is still too short.
 
 ## Donations
 
@@ -250,8 +347,8 @@ MSFT with nothing flagging the mismatch. One instrument, set in one place,
 read by every tab; tabs that follow it say so with a context chip.
 
 Tabs are ordered by kind: instrument-scoped views (Analysis, Fundamentals,
-Factor Score), then tools (Trade Setup, Journal, Watchlist, Daily Digest),
-then reference (Multi-Asset, Calendar, Settings). Market News was removed as a
+Factor Score, Quant Desk), then tools (Trade Setup, Journal, Watchlist, Daily
+Digest), then reference (Multi-Asset, Calendar, Settings). Market News was removed as a
 top-level tab — it held one collapsed accordion on an otherwise empty screen —
 and now sits under the ticker-specific news in Analysis.
 

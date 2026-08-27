@@ -18,6 +18,7 @@ import bcrypt
 import storage
 import scoring
 import support
+import quant
 import pyotp
 import qrcode
 import html as html_lib
@@ -1339,6 +1340,92 @@ hr, [data-testid="stDivider"] hr {
 .tv-tick-chg.neg { color: var(--rose); }
 
 /* ==================================================================
+   QUANT DESK — masthead for the research tab
+
+   Given its own lockup because it is a different KIND of surface from the
+   rest of the app: these are models with assumptions, not readouts. The
+   sweep across the rule is slow and travels once — a research desk coming
+   online, not a notification demanding attention.
+   ================================================================== */
+.tv-desk-head {
+    position: relative;
+    padding: 0.2rem 0 1.35rem;
+    margin-bottom: 0.5rem;
+    animation: reveal-up 0.7s var(--ease) both;
+}
+.tv-desk-head::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 1px;
+    background: linear-gradient(90deg, var(--gold-500), rgba(255,255,255,0.05) 45%, transparent 85%);
+}
+/* A single specular pass along the rule, on a long cycle. */
+.tv-desk-head::before {
+    content: "";
+    position: absolute;
+    left: 0; bottom: 0;
+    height: 1px; width: 22%;
+    background: linear-gradient(90deg, transparent, var(--gold-300), transparent);
+    animation: desk-sweep 8s var(--ease) infinite;
+    pointer-events: none;
+}
+.tv-desk-eyebrow {
+    font-family: var(--font-ui);
+    font-size: 0.58rem;
+    font-weight: 600;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: var(--gold-500);
+}
+.tv-desk-title {
+    font-family: var(--font-display);
+    font-size: 1.85rem;
+    font-weight: 600;
+    font-variation-settings: 'opsz' 144;
+    letter-spacing: -0.02em;
+    color: var(--text-100);
+    line-height: 1.15;
+    margin-top: 0.2rem;
+}
+.tv-desk-sub {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.09em;
+    color: var(--text-500);
+    margin-top: 0.32rem;
+}
+
+/* Nested sub-tabs sit one level down visually, so the eye reads the outer
+   rail as navigation and this as a mode switch within one surface. */
+[data-testid="stTabs"] [data-testid="stTabs"] [role="tablist"] {
+    background: rgba(255, 255, 255, 0.018);
+    border-color: rgba(255, 255, 255, 0.045);
+    padding: 4px !important;
+}
+[data-testid="stTabs"] [data-testid="stTabs"] [role="tab"] p {
+    font-size: 0.66rem !important;
+    letter-spacing: 0.1em !important;
+}
+
+/* Solver panels arrive with a brief settle rather than snapping in — the
+   models behind them take real time, and the motion acknowledges that
+   instead of pretending the answer was instant. */
+[data-testid="stTabs"] [data-testid="stTabs"] [data-testid="stTabPanel"] [data-testid="stPlotlyChart"] {
+    animation: solve-in 0.85s var(--ease) both;
+}
+@keyframes solve-in {
+    from { opacity: 0; transform: translateY(14px) scale(0.985); filter: blur(6px); }
+    60%  { filter: blur(0); }
+    to   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+@keyframes desk-sweep {
+    0%        { left: -22%; opacity: 0; }
+    12%       { opacity: 1; }
+    55%, 100% { left: 100%; opacity: 0; }
+}
+
+/* ==================================================================
    SUPPORT BUTTONS
 
    Cards rather than a row of coloured platform badges. Each one carries
@@ -2318,10 +2405,10 @@ current_ticker = (st.session_state.get("analysis_run") or {}).get("ticker", "")
 # which is two clicks and a whole navigation slot for one list. It now sits
 # under the stock-specific news in Analysis, where market context is
 # actually being read.
-(tab_analysis, tab_fundamentals, tab_factors,
+(tab_analysis, tab_fundamentals, tab_factors, tab_quant,
  tab_tradesetup, tab_journal, tab_watchlist, tab_digest,
  tab_multiasset, tab_calendar, tab_settings, tab_support) = st.tabs(
-    ["Analysis", "Fundamentals", "Factor Score",
+    ["Analysis", "Fundamentals", "Factor Score", "Quant Desk",
      "Trade Setup", "Journal", "Watchlist", "Digest",
      "Multi-Asset", "Calendar", "Settings", "Support"]
 )
@@ -3731,48 +3818,6 @@ def _parse_news_timestamp(published: str) -> datetime | None:
 # ----------------------------------------------------------------------
 # 12. PORTFOLIO ALLOCATION (backward-looking Sharpe optimization)
 # ----------------------------------------------------------------------
-def optimize_portfolio(tickers: list[str], iterations: int = 3000):
-    """
-    Randomly samples portfolio weightings and keeps whichever had the best
-    historical Sharpe ratio (return divided by volatility, ignoring a
-    risk-free rate) over the lookback window. IMPORTANT: this literally
-    finds whatever WOULD have worked best in the past — a well-known trap
-    among quants (sometimes called Sharpe-ratio overfitting), since the
-    mix of stocks that happened to do best historically is not reliably
-    the mix that will do best going forward. Shown for research interest,
-    not as a recommended allocation.
-    """
-    price_data = {}
-    for t in tickers:
-        try:
-            price_data[t] = load_daily_data(t)["Close"]
-        except Exception:
-            continue
-
-    if len(price_data) < 2:
-        return None, None
-
-    prices = pd.DataFrame(price_data).dropna()
-    returns = prices.pct_change().dropna()
-    mean_returns = returns.mean()
-    cov = returns.cov()
-    valid_tickers = list(prices.columns)
-
-    best_sharpe = -np.inf
-    best_weights = None
-    for _ in range(iterations):
-        w = np.random.random(len(valid_tickers))
-        w /= w.sum()
-        port_return = np.dot(w, mean_returns)
-        port_vol = np.sqrt(np.dot(w.T, np.dot(cov, w)))
-        sharpe_ratio = port_return / port_vol if port_vol != 0 else -np.inf
-        if sharpe_ratio > best_sharpe:
-            best_sharpe = sharpe_ratio
-            best_weights = w
-
-    return dict(zip(valid_tickers, best_weights)), best_sharpe
-
-
 # ----------------------------------------------------------------------
 # DAILY DIGEST — a one-screen "here's what to look at today" summary,
 # pulling together watchlist tilt CHANGES (not just current state),
@@ -5379,27 +5424,15 @@ with tab_watchlist:
                 else:
                     st.caption("Counts each ticker equally (not by dollar exposure) — not a substitute for your actual position sizes.")
 
-                # --- Portfolio allocation (backward-looking, research interest only) ---
-                st.subheader("Historical Sharpe-optimal allocation")
-                with st.spinner("Running allocation search..."):
-                    weights, best_sharpe = optimize_portfolio(tickers_to_scan)
-
-                if weights is None:
-                    st.write("Need at least 2 valid tickers with price history to compute this.")
-                else:
-                    weights_df = pd.DataFrame(
-                        {"Ticker": list(weights.keys()), "Weight %": [w * 100 for w in weights.values()]}
-                    ).sort_values("Weight %", ascending=False).reset_index(drop=True)
-                    st.dataframe(weights_df, hide_index=True, use_container_width=True)
-                    st.metric("Historical Sharpe ratio of this mix", f"{best_sharpe:.2f}")
-                    st.warning(
-                        "This is the weighting that WOULD have had the best risk-adjusted return "
-                        "over the exact past window used here — found by randomly trying thousands "
-                        "of combinations. This kind of backward-looking optimization is well known "
-                        "(sometimes called 'Sharpe ratio overfitting') to not reliably predict which "
-                        "mix will do best going forward. It's shown for research interest, not as a "
-                        "recommended portfolio."
-                    )
+                # Allocation moved to the Quant Desk, which solves the frontier
+                # properly instead of randomly sampling weight vectors and
+                # keeping whichever looked best — and reports out-of-sample
+                # decay rather than presenting the in-sample fit as a result.
+                st.caption(
+                    "Looking for allocations? The **Quant Desk** tab solves the efficient "
+                    "frontier for this basket, alongside minimum-variance and risk-parity "
+                    "portfolios, and tests each on data it was not fitted to."
+                )
     else:
         st.info("Edit the watchlist above and select **Scan watchlist** to compare tickers.")
 
@@ -5484,6 +5517,583 @@ with tab_analysis:
                 if item["description"]:
                     st.caption(item["description"])
 
+
+
+
+with tab_quant:
+    # ----------------------------------------------------------------------
+    # QUANT DESK — three models that a risk or portfolio desk actually runs.
+    #
+    # Grouped into one tab with sub-tabs rather than three top-level entries:
+    # they share an audience and a mindset, and the rail is already long. The
+    # mathematics lives in quant.py, which imports no Streamlit and is tested
+    # directly in test_quant.py.
+    # ----------------------------------------------------------------------
+    st.markdown(
+        '<div class="tv-desk-head">'
+        '<div class="tv-desk-eyebrow">Quantitative Research</div>'
+        '<div class="tv-desk-title">Quant Desk</div>'
+        '<div class="tv-desk-sub">Statistical arbitrage · Value at Risk · Portfolio construction</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    sub_pairs, sub_var, sub_opt = st.tabs(
+        ["Statistical Arbitrage", "Value at Risk", "Portfolio Optimiser"])
+
+    # ==================================================================
+    # STATISTICAL ARBITRAGE
+    # ==================================================================
+    with sub_pairs:
+        st.subheader("Pairs cointegration")
+        explain(
+            "Two stocks that normally move together sometimes drift apart. If the gap between "
+            "them reliably closes, you can buy the cheap one and short the expensive one and "
+            "profit from them converging — regardless of whether the market goes up or down. "
+            "The hard part is proving the gap actually closes rather than just looking like it "
+            "might, which is what the cointegration test below is for."
+        )
+
+        pair_c1, pair_c2, pair_c3 = st.columns([1, 1, 1])
+        with pair_c1:
+            leg_a = st.text_input("Leg A", value=current_ticker or "KO",
+                                  key="pair_a").upper().strip()
+        with pair_c2:
+            leg_b = st.text_input("Leg B", value="PEP", key="pair_b").upper().strip()
+        with pair_c3:
+            entry_z = st.slider("Entry threshold (σ)", 1.0, 3.0, 2.0, 0.25, key="pair_entry")
+
+        st.caption(
+            "Pairs work best on genuine economic substitutes — two supermarkets, two oil majors, "
+            "two payment networks. Unrelated names occasionally test cointegrated by chance, "
+            "which is exactly what the p-value below is there to catch."
+        )
+
+        if st.button("Run cointegration test", type="primary", key="run_pair"):
+            if not leg_a or not leg_b or leg_a == leg_b:
+                st.error("Enter two different tickers.")
+            else:
+                try:
+                    with st.spinner(f"Testing {leg_a} against {leg_b}..."):
+                        px_a = load_daily_data(leg_a)["Close"]
+                        px_b = load_daily_data(leg_b)["Close"]
+                        _result = quant.analyse_pair(px_a, px_b, leg_a, leg_b)
+                    if _result is None:
+                        # Silent None was leaving the placeholder on screen with
+                        # no indication the test had even run.
+                        st.session_state.pop("pair_result", None)
+                        st.error(
+                            f"Not enough overlapping history for {leg_a} and {leg_b}. "
+                            "The test needs at least 120 trading days on which both traded — "
+                            "a recent listing, or two very different exchange calendars, "
+                            "will fall short."
+                        )
+                    else:
+                        st.session_state["pair_result"] = _result
+                        st.session_state["pair_entry_used"] = entry_z
+                except Exception as exc:
+                    st.session_state.pop("pair_result", None)
+                    if _is_rate_limit_error(exc):
+                        st.error("Yahoo is rate-limiting right now — try again in a minute.")
+                    else:
+                        st.error(f"Couldn't load one of those tickers ({leg_a}, {leg_b}).")
+
+        pair = st.session_state.get("pair_result")
+        if pair is None:
+            st.info("Pick two related tickers and run the test to see whether their spread mean-reverts.")
+        else:
+            used_entry = st.session_state.get("pair_entry_used", 2.0)
+            headline, tone, detail = quant.pair_verdict(pair, used_entry)
+            render_verdict(
+                f"{pair.ticker_a} vs {pair.ticker_b}", headline, tone=tone, note=detail,
+                right=f"{pair.current_z:+.2f}", right_sub="spread σ",
+            )
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric(
+                "Cointegration p", f"{pair.adf_pvalue:.3f}",
+                help="Probability of seeing a spread this mean-reverting if the two prices were "
+                     "actually unrelated. Below 0.05 is the usual bar. Judged against the "
+                     "Engle-Granger null, not the plain one — see the note below.",
+            )
+            _hl = pair.half_life_days
+            m2.metric(
+                "Half-life", "∞" if not np.isfinite(_hl) else f"{_hl:.0f}d",
+                help="Trading days for the spread to close half the gap back to its mean. "
+                     "Above roughly 120 days it is too slow to be worth financing.",
+            )
+            m3.metric(
+                "Hedge ratio", f"{pair.hedge_ratio:.3f}",
+                help=f"Units of {pair.ticker_b} that offset one unit of {pair.ticker_a}, "
+                     "fitted on log prices so it is a proportional relationship.",
+            )
+            m4.metric(
+                "Correlation", f"{pair.correlation:.2f}",
+                help="Correlation of log prices. High correlation is NOT cointegration — two "
+                     "series can move together for years and still drift apart permanently.",
+            )
+
+            st.subheader("The spread")
+            explain(
+                "The line is how far apart the two stocks are right now, measured in standard "
+                "deviations of their own recent history. Zero means they are at their normal "
+                "relationship. The shaded bands are where a trade would open; the middle is "
+                "where it would close."
+            )
+            z_fig = go.Figure()
+            z_fig.add_hrect(y0=used_entry, y1=max(4.5, abs(pair.zscore).max() + 0.5),
+                            fillcolor="rgba(240,97,111,0.07)", line_width=0)
+            z_fig.add_hrect(y0=-max(4.5, abs(pair.zscore).max() + 0.5), y1=-used_entry,
+                            fillcolor="rgba(95,207,155,0.07)", line_width=0)
+            z_fig.add_trace(go.Scatter(
+                x=pair.zscore.index, y=pair.zscore, mode="lines", name="Spread z",
+                line=dict(width=1.7, color=CHART_GOLD, shape="spline", smoothing=0.3),
+            ))
+            for level in (used_entry, -used_entry):
+                z_fig.add_hline(y=level, line=dict(color="rgba(212,176,120,0.45)", width=1, dash="dot"))
+            z_fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.22)", width=1))
+            st.plotly_chart(style_chart(z_fig, height=320, show_legend=False),
+                            use_container_width=True)
+
+            with st.expander("Why the p-value uses stricter critical values than a normal ADF test"):
+                st.markdown(f"""
+The spread is not a series handed to us — it is the *residual of a fitted regression*. Ordinary
+least squares picks the hedge ratio that makes that residual as small and as stable as possible,
+so it already looks more mean-reverting than a random series would before the test ever sees it.
+
+Judging it against standard Augmented Dickey-Fuller critical values therefore over-rejects. Measured
+here on independent random walks, the plain values called **11%** of them cointegrated at a nominal
+5% — more than double. That error is how pairs books fill up with relationships that were never there.
+
+This uses the Engle-Granger null instead, obtained from 40,000 simulations of the real thing
+(regress one random walk on another, test the residual). Its 5% critical value is
+**{quant.EG_NULL_QUANTILES[4]:.3f}** against **{quant.ADF_NULL_QUANTILES[4]:.3f}** for plain ADF,
+and it matches the published Engle-Granger figure of about −3.34. The false positive rate measured
+after the fix is **4.4%**.
+""")
+
+            st.subheader("Spread backtest")
+            explain(
+                "This trades the rule mechanically: open when the gap is wide, close when it "
+                "returns to normal, stop out if it keeps widening. It is the spread's own "
+                "return, so it does not care which way the market went."
+            )
+            with st.spinner("Walking the spread forward..."):
+                pair_bt = quant.backtest_pair(pair, entry_z=used_entry)
+
+            if "error" in pair_bt:
+                st.info(pair_bt["error"])
+            else:
+                b1, b2, b3, b4 = st.columns(4)
+                b1.metric("Round trips", f"{pair_bt['trades']}")
+                b2.metric("Time in market", f"{pair_bt['exposure_pct']:.0f}%")
+                b3.metric("Win rate", "N/A" if not np.isfinite(pair_bt["win_rate_pct"])
+                          else f"{pair_bt['win_rate_pct']:.0f}%")
+                b4.metric("Sharpe", "N/A" if not np.isfinite(pair_bt["sharpe"])
+                          else f"{pair_bt['sharpe']:.2f}",
+                          help="Annualised, on days the position was open. Gross of financing, "
+                               "borrow cost and slippage — all three of which a real pairs desk "
+                               "pays and none of which are modelled here.")
+
+                eq = pair_bt["equity_curve"]
+                eq_fig = go.Figure()
+                eq_fig.add_trace(go.Scatter(
+                    x=eq.index, y=eq * 100, mode="lines", name="Cumulative",
+                    line=dict(width=1.8, color=CHART_JADE, shape="spline", smoothing=0.3),
+                    fill="tozeroy", fillcolor="rgba(95,207,155,0.08)",
+                ))
+                eq_fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.2)", width=1))
+                st.plotly_chart(style_chart(eq_fig, height=260, show_legend=False),
+                                use_container_width=True)
+                st.warning(
+                    "Signals are lagged one day, so the position earns the move AFTER the decision "
+                    "rather than the move that triggered it — without that lag a pairs backtest "
+                    "manufactures returns nobody could have captured. Costs are still excluded, and "
+                    "a spread that held for years can break permanently when the business reason "
+                    "behind it changes."
+                )
+
+
+    # ==================================================================
+    # VALUE AT RISK
+    # ==================================================================
+    with sub_var:
+        st.subheader("Value at Risk")
+        explain(
+            "VaR answers one question: on a bad day, how much could this lose? A 95% one-day "
+            "VaR of $2,400 means that on the worst 5% of days you would expect to lose at least "
+            "that much. It deliberately says nothing about how bad the worst day gets — which is "
+            "why Expected Shortfall sits beside it, averaging the losses out in that tail."
+        )
+
+        if not current_ticker:
+            st.info("Load a ticker in the command bar at the top to measure its risk.")
+        else:
+            v1, v2, v3 = st.columns(3)
+            with v1:
+                var_conf = st.select_slider("Confidence", options=[0.90, 0.95, 0.99],
+                                            value=0.95, key="var_conf",
+                                            format_func=lambda c: f"{c * 100:.0f}%")
+            with v2:
+                var_horizon = st.select_slider("Horizon (trading days)",
+                                               options=[1, 5, 10, 21], value=1, key="var_h")
+            with v3:
+                var_value = st.number_input("Position size", min_value=1000, max_value=100_000_000,
+                                            value=100_000, step=5000, key="var_value",
+                                            help="The figures below scale linearly with this.")
+
+            # Loads its own data rather than relying on daily_df leaking out of
+            # the analysis block. That variable only exists if the analysis ran
+            # AND succeeded, so depending on it means a failed load upstream
+            # turns this panel into a NameError. The loader is cached, so
+            # asking again costs nothing.
+            var_result, var_returns, var_currency = None, None, "USD"
+            try:
+                with st.spinner("Measuring tail risk..."):
+                    _var_df = load_daily_data(current_ticker)
+                    var_returns = _var_df["Close"].pct_change().dropna()
+                    var_currency = get_fundamentals(current_ticker).get("currency") or "USD"
+                    var_result = quant.value_at_risk(
+                        var_returns, var_conf, var_horizon, float(var_value))
+            except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    st.error("Yahoo is rate-limiting right now — try again in a minute.")
+                else:
+                    st.error(f"Couldn't load price history for {current_ticker}.")
+
+            if var_result is None:
+                pass
+            elif "error" in var_result:
+                st.info(var_result["error"])
+            else:
+                _tone = "bear" if var_result["normality_rejected"] else "neutral"
+                render_verdict(
+                    f"{current_ticker} · {var_conf * 100:.0f}% VaR over "
+                    f"{var_horizon} day{'s' if var_horizon > 1 else ''}",
+                    money(var_result["historical_var_money"], var_currency),
+                    tone=_tone,
+                    note=f"On the worst {(1 - var_conf) * 100:.0f}% of "
+                         f"{var_horizon}-day periods, a {money(var_value, var_currency)} position in "
+                         f"{current_ticker} lost at least this much. Measured from this stock's own "
+                         f"{var_result['n_obs']} days of history, not from an assumed bell curve.",
+                    right=f"{var_result['historical_var_pct']:.2f}%",
+                    right_sub="of position",
+                )
+
+                st.subheader("Three estimates, and why they differ")
+                explain(
+                    "The same risk measured three ways. Historical counts what actually happened. "
+                    "Gaussian assumes returns follow a neat bell curve — they don't, which is why "
+                    "it is usually the smallest and the most reassuring. Cornish-Fisher corrects "
+                    "the bell curve for the real shape of the tail."
+                )
+                e1, e2, e3, e4 = st.columns(4)
+                e1.metric("Historical", money(var_result["historical_var_money"], var_currency),
+                          help="Empirical quantile. Assumes nothing about the distribution's shape.")
+                e2.metric("Gaussian", money(var_result["gaussian_var_money"], var_currency),
+                          help="Assumes normally distributed returns. Almost always the smallest "
+                               "number, and almost always wrong in the dangerous direction.")
+                e3.metric("Cornish-Fisher", money(var_result["cornish_fisher_var_money"], var_currency),
+                          help="The Gaussian quantile corrected for skew and fat tails.")
+                e4.metric("Expected Shortfall",
+                          money(var_result["expected_shortfall_money"], var_currency),
+                          help="The AVERAGE loss on days worse than VaR. This is the number that "
+                               "matters when a tail event actually arrives.")
+
+                if not var_result.get("cornish_fisher_valid", True):
+                    st.caption(
+                        "The Cornish-Fisher expansion did not converge on this distribution — its "
+                        "sample skew and kurtosis fall outside the region where the correction is a "
+                        "valid quantile — so it has fallen back to the historical figure rather than "
+                        "quoting a number the method cannot support."
+                    )
+
+                gap = var_result["historical_var_money"] - var_result["gaussian_var_money"]
+                if gap > 0:
+                    st.warning(
+                        f"The bell-curve estimate understates the real loss by "
+                        f"{money(gap, var_currency)} at this confidence level. That gap is the entire "
+                        "reason risk desks stopped trusting Gaussian VaR — it is smallest exactly "
+                        "when the tail is fattest."
+                    )
+
+                st.subheader("The loss distribution")
+                explain(
+                    "Every daily move this stock made, sorted into buckets. The shaded region on "
+                    "the left is the tail the VaR figure is drawn from — the days you are being "
+                    "warned about."
+                )
+                r_pct = var_result["returns"] * 100
+                cutoff = var_result["historical_quantile"] * 100
+                hist_fig = go.Figure()
+                hist_fig.add_trace(go.Histogram(
+                    x=r_pct[r_pct > cutoff], nbinsx=70, name="Ordinary days",
+                    marker=dict(color="rgba(212,176,120,0.55)",
+                                line=dict(width=0.4, color="rgba(212,176,120,0.9)")),
+                ))
+                hist_fig.add_trace(go.Histogram(
+                    x=r_pct[r_pct <= cutoff], nbinsx=25, name=f"Worst {(1 - var_conf) * 100:.0f}%",
+                    marker=dict(color="rgba(240,97,111,0.75)",
+                                line=dict(width=0.4, color="rgba(240,97,111,1)")),
+                ))
+                hist_fig.add_vline(x=cutoff, line=dict(color=CHART_ROSE, width=2, dash="dash"),
+                                   annotation_text="VaR", annotation_position="top left",
+                                   annotation_font=dict(color=CHART_ROSE, size=11))
+                hist_fig.update_layout(barmode="overlay", bargap=0.02)
+                st.plotly_chart(style_chart(hist_fig, height=340), use_container_width=True)
+
+                d1, d2, d3, d4 = st.columns(4)
+                d1.metric("Skew", f"{var_result['skew']:+.2f}",
+                          help="Negative means the left tail is longer — big losses outrun big "
+                               "gains. Typical for equities.")
+                d2.metric("Excess kurtosis", f"{var_result['excess_kurtosis']:+.2f}",
+                          help="Above zero means fatter tails than a bell curve: extreme days "
+                               "happen more often than the normal model expects.")
+                d3.metric("Annualised vol", f"{var_result['vol_annual_pct']:.1f}%")
+                d4.metric("Worst single day", f"{var_result['worst_day_pct']:.2f}%")
+
+                if var_result["normality_rejected"]:
+                    st.caption(
+                        f"A Jarque-Bera test rejects normality at p = {var_result['jarque_bera_p']:.4f}. "
+                        "These returns are not bell-curved, so treat the Gaussian column as an "
+                        "illustration of the error rather than as an estimate."
+                    )
+
+                st.subheader("Was the VaR ever any good?")
+                explain(
+                    "A 95% VaR should be breached on about 5 days in 100. Far fewer and it is "
+                    "too cautious; far more and it was understating the risk all along. This "
+                    "checks which — the step almost nobody bothers with."
+                )
+                kup = quant.kupiec_test(var_returns, var_result["historical_quantile"], var_conf)
+                if "error" in kup:
+                    st.info(kup["error"])
+                else:
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("Breaches observed", f"{kup['breaches']} of {kup['n_obs']}")
+                    k2.metric("Breach rate", f"{kup['observed_rate_pct']:.2f}%",
+                              delta=f"{kup['observed_rate_pct'] - kup['expected_rate_pct']:+.2f}pp "
+                                    "vs expected", delta_color="off")
+                    k3.metric("Kupiec p", "N/A" if not np.isfinite(kup["p_value"])
+                              else f"{kup['p_value']:.3f}",
+                              help="Above 0.05 means the breach rate is consistent with what the "
+                                   "model promised.")
+                    st.write(kup["verdict"])
+
+                st.warning(
+                    "VaR describes the past, and multi-day figures scale by √t, which assumes "
+                    "each day is independent of the last. Volatility clusters instead — calm "
+                    "follows calm and panic follows panic — so multi-day VaR understates risk "
+                    "precisely during the crises it exists to measure."
+                )
+
+
+    # ==================================================================
+    # PORTFOLIO OPTIMISER
+    # ==================================================================
+    with sub_opt:
+        st.subheader("Portfolio construction")
+        explain(
+            "Given a basket of stocks, how much of each should you hold? This builds four "
+            "answers — the highest return per unit of risk, the calmest possible mix, one where "
+            "every holding contributes equal risk, and plain equal weight — then checks how each "
+            "held up on data it never saw. That last step is the one that matters."
+        )
+
+        opt_tickers_text = st.text_area(
+            "Tickers", value=st.session_state.get("watchlist_text", DEFAULT_WATCHLIST),
+            key="opt_tickers", height=68,
+            help="Defaults to your watchlist. Two or more, comma separated.",
+        )
+        opt_run = st.button("Build portfolios", type="primary", key="run_opt")
+
+        if opt_run:
+            names = [t.strip().upper() for t in opt_tickers_text.split(",") if t.strip()][:25]
+            if len(names) < 2:
+                st.error("Enter at least two tickers.")
+            else:
+                frames, failed = {}, []
+                progress = st.progress(0.0, text="Loading price history...")
+                for i, name in enumerate(names):
+                    try:
+                        frames[name] = load_daily_data(name)["Close"]
+                    except Exception:
+                        failed.append(name)
+                    progress.progress((i + 1) / len(names), text=f"Loaded {name}...")
+                progress.empty()
+
+                if len(frames) < 2:
+                    st.error("Couldn't load enough of those tickers to build a portfolio.")
+                    st.session_state.pop("opt_result", None)
+                else:
+                    if failed:
+                        st.caption(f"Skipped (no data): {', '.join(failed)}")
+                    with st.spinner("Solving the efficient frontier..."):
+                        # align_prices normalises to calendar dates before
+                        # joining; building the frame from raw indices leaves a
+                        # mostly-NaN matrix that dropna() empties entirely.
+                        price_matrix = quant.align_prices(frames)
+                        _opt = (quant.optimise_portfolio(price_matrix)
+                                if not price_matrix.empty else None)
+                    if _opt is None:
+                        st.session_state.pop("opt_result", None)
+                        st.error(
+                            "Couldn't build a portfolio from these tickers. The optimiser needs at "
+                            "least two names with 120+ days of overlapping history — check for "
+                            "recent listings or symbols from very different exchange calendars."
+                        )
+                    else:
+                        st.session_state["opt_result"] = _opt
+
+        opt = st.session_state.get("opt_result")
+        if opt is None:
+            st.info("Enter a basket and select **Build portfolios** to solve the frontier.")
+        else:
+            summary = opt["summary"]
+            has_holdout = "Out-of-sample Sharpe" in summary.columns
+            best_col = "Out-of-sample Sharpe" if has_holdout else "In-sample Sharpe"
+            best_row = summary.loc[summary[best_col].idxmax()]
+
+            # Tone tracks whether the optimiser beat the naive benchmark, not
+            # whether the winning Sharpe happened to be positive. A jade card
+            # over a note saying "this added nothing" is a mixed message, and
+            # beating equal weight by 0.02 Sharpe is not beating it.
+            _eq = summary.loc[summary["Portfolio"] == "Equal weight", best_col]
+            _margin = float(best_row[best_col]) - float(_eq.iloc[0]) if len(_eq) else 0.0
+            if float(best_row[best_col]) <= 0:
+                _tone = "bear"
+            elif str(best_row["Portfolio"]) == "Equal weight" or _margin < 0.15:
+                _tone = "neutral"
+            else:
+                _tone = "bull"
+
+            render_verdict(
+                "Best out of sample" if has_holdout else "Best in sample",
+                str(best_row["Portfolio"]),
+                tone=_tone,
+                note=quant.optimiser_verdict(opt),
+                right=f"{float(best_row[best_col]):.2f}",
+                right_sub="Sharpe",
+            )
+
+            st.subheader("The efficient frontier")
+            explain(
+                "Every point on the curve is the calmest possible portfolio for that level of "
+                "return. Nothing can sit above and to the left of it. The dots are the individual "
+                "stocks — notice how far inside the curve they fall, which is diversification "
+                "doing its work."
+            )
+            frontier = opt["frontier"]
+            ind = opt["individual"]
+            f_fig = go.Figure()
+            f_fig.add_trace(go.Scatter(
+                x=frontier["vol_pct"], y=frontier["return_pct"], mode="lines",
+                name="Efficient frontier",
+                line=dict(width=2.4, color=CHART_GOLD, shape="spline", smoothing=0.5),
+            ))
+            f_fig.add_trace(go.Scatter(
+                x=ind["Volatility %"], y=ind["Return %"], mode="markers+text",
+                name="Individual stocks", text=[f"{t}  " for t in ind["Ticker"]],
+                # Single stocks always sit at the high-volatility right edge,
+                # so labels point inward. Anchored above centre they run off
+                # the plot and get sliced mid-word on a phone.
+                textposition="middle left", cliponaxis=False,
+                textfont=dict(size=9, color=CHART_MUTED),
+                marker=dict(size=7, color="rgba(255,255,255,0.30)",
+                            line=dict(width=1, color="rgba(255,255,255,0.45)")),
+            ))
+            tone_map = {"Maximum Sharpe": CHART_GOLD, "Minimum variance": CHART_JADE,
+                        "Risk parity": "#8FB8E8", "Equal weight": CHART_ROSE}
+            for _, row in summary.iterrows():
+                f_fig.add_trace(go.Scatter(
+                    x=[row["In-sample vol %"]], y=[row["In-sample return %"]],
+                    mode="markers", name=str(row["Portfolio"]),
+                    marker=dict(size=15, symbol="diamond",
+                                color=tone_map.get(row["Portfolio"], CHART_GOLD),
+                                line=dict(width=1.5, color="rgba(10,12,17,0.85)")),
+                ))
+            f_fig.update_xaxes(title_text="Annualised volatility %")
+            # The theme parks the y-axis on the right with a margin sized for
+            # tick labels alone; a rotated axis title needs the extra room or
+            # it is squeezed into an unreadable column at the screen edge.
+            style_chart(f_fig, height=430)
+            f_fig.update_layout(margin=dict(l=8, r=88, t=34, b=14))
+            f_fig.update_yaxes(title_text="Annualised return %", title_standoff=8)
+            st.plotly_chart(f_fig, use_container_width=True)
+
+            st.subheader("Allocations")
+            explain(
+                "How each strategy would split your money. Minimum variance and risk parity never "
+                "look at expected returns at all — only at how volatile each stock is and how they "
+                "move together — which is why they tend to be far more stable than the Sharpe "
+                "maximiser from one period to the next."
+            )
+            # Transposed so each row is a stock: comparing four strategies'
+            # views of one name is the question people actually ask here.
+            weights_pct = (opt["weights"].T * 100).round(1)
+            weights_pct.index.name = "Ticker"
+            st.dataframe(
+                weights_pct.reset_index(),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    col: st.column_config.ProgressColumn(
+                        col, format="%.1f%%", min_value=0.0, max_value=100.0
+                    )
+                    for col in weights_pct.columns
+                },
+            )
+
+            st.subheader("In sample versus out of sample")
+            explain(
+                "The left columns are how each mix looked on the data used to build it. The right "
+                "columns are how it did on data it had never seen. A big drop between them means "
+                "the optimiser was fitting luck, not skill — which is the normal outcome."
+            )
+            st.dataframe(summary.round(2), hide_index=True, use_container_width=True)
+            st.caption(
+                f"Fitted on {opt['in_sample_days']} days, tested on the "
+                f"{opt['out_sample_days']} days that followed."
+                if has_holdout else "Not enough history to hold data back for a fair test."
+            )
+
+            with st.expander("Correlation matrix"):
+                corr = opt["correlation"].round(2)
+                c_fig = go.Figure(go.Heatmap(
+                    z=corr.to_numpy(), x=list(corr.columns), y=list(corr.index),
+                    zmin=-1, zmax=1, colorscale=[
+                        [0.0, "#2E5F7A"], [0.5, "rgba(20,24,32,0.9)"], [1.0, CHART_GOLD],
+                    ],
+                    text=corr.to_numpy(), texttemplate="%{text:.2f}",
+                    textfont=dict(size=11), hoverongaps=False,
+                    colorbar=dict(thickness=10, outlinewidth=0,
+                                  tickfont=dict(size=10, color=CHART_MUTED)),
+                ))
+                # style_chart pushes the y-axis to the right (price-chart
+                # convention) and draws gridlines; on a matrix both are wrong,
+                # and the axis has to be re-set after the theme, not before.
+                style_chart(c_fig, height=90 + 42 * len(corr), show_legend=False)
+                c_fig.update_layout(
+                    margin=dict(l=8, r=8, t=8, b=8), hovermode="closest",
+                )
+                c_fig.update_yaxes(autorange="reversed", side="left",
+                                   showgrid=False, automargin=True)
+                c_fig.update_xaxes(showspikes=False, side="bottom", automargin=True)
+                st.plotly_chart(c_fig, use_container_width=True)
+                st.caption(
+                    "Diversification only works between things that are not already the same bet. "
+                    "A basket of ten names that all correlate above 0.8 is closer to one position "
+                    "than to ten, and the frontier above will barely bend."
+                )
+
+            st.warning(
+                "Mean-variance optimisation is an error maximiser. It cannot tell a genuinely "
+                "superior stock from one whose average return was flattered by luck, so it "
+                "concentrates into whichever had the most fortunate estimate. That is why the "
+                "out-of-sample columns exist, and why equal weight beats the optimiser far more "
+                "often than the mathematics suggests it should. Long-only, no costs, no taxes, "
+                "no rebalancing drag — and past covariance is not future covariance."
+            )
 
 
 with tab_support:
