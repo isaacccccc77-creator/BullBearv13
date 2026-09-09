@@ -26,6 +26,7 @@ Three principles run through the whole file:
 
 from __future__ import annotations
 
+import html as _html
 from dataclasses import dataclass, asdict
 from typing import Optional
 
@@ -950,6 +951,23 @@ def operating_verdict(history: pd.DataFrame) -> str:
 # INVESTMENT MEMO
 # ======================================================================
 
+def _safe(text) -> str:
+    """
+    Neutralises HTML in anything that reaches the memo from outside.
+
+    The memo is rendered as markdown with HTML enabled, so it is an HTML
+    sink. Most of what goes into it is numbers this module formatted
+    itself, but three fields are not: the company name is typed by the
+    user, and the sector and industry come from a third-party data feed.
+    Escaping happens here, at the boundary where untrusted text enters
+    the document, rather than at the point of render — by then it is
+    indistinguishable from the markdown that is supposed to be markup.
+    """
+    if text is None:
+        return ""
+    return _html.escape(str(text), quote=False)
+
+
 def _millions(x) -> str:
     if x is None or not np.isfinite(x):
         return "n/a"
@@ -1097,14 +1115,14 @@ def build_memo(company: str, snapshot: dict, lbo: Optional[LBOResult],
     drift away from the numbers it is describing.
     """
     lines = [
-        f"# Investment memo — {company}",
+        f"# Investment memo — {_safe(company)}",
         "",
         f"**Recommendation: {rec['verdict']}**",
         "",
     ]
 
-    sector = snapshot.get("sector") or "n/a"
-    industry = snapshot.get("industry") or "n/a"
+    sector = _safe(snapshot.get("sector")) or "n/a"
+    industry = _safe(snapshot.get("industry")) or "n/a"
     lines += [
         "## 1. The business",
         "",

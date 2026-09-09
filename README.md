@@ -89,6 +89,7 @@ written `0600`, with the mode set at creation rather than chmod-ed afterwards.
 | `test_support.py` | Donation-link validation: https only, host-pinned, injection-proof. |
 | `test_quant.py` | The three quant models: null calibration, coverage, optimiser properties. |
 | `test_deals.py` | The deal models: identities, closed-form cases, monotonicities. |
+| `profile_app.py` | Writes an instrumented copy that reports where a rerun went. |
 | `storage.py` | Persistence. JSON files or Postgres, chosen by `DATABASE_URL`. |
 | `scoring.py` | The composite score. No Streamlit import, so the maths is testable directly. |
 | `support.py` | Donation links. Validates and host-pins them; handles no money itself. |
@@ -481,26 +482,57 @@ Factor Score), then the two model desks (Quant Desk, Deal Room), then tools
 (Trade Setup, Journal, Watchlist, Daily Digest), then reference (Multi-Asset,
 Calendar, Settings).
 
-### The rail is near its limit
+### The rail is long, but it is not the cost
 
-Thirteen tabs is one row too many on a laptop, and it costs more than looks.
-Streamlit re-executes the entire script on every interaction, and `st.tabs`
-renders *every* tab body, not just the visible one — all thirteen run on every
-click. The status bar now reports the real per-rerun cost so the number is not
-a guess.
+Thirteen tabs is one row too many on a laptop, and the obvious inference is
+that it is also what makes the app slow: Streamlit re-executes the entire
+script on every interaction, and `st.tabs` renders *every* tab body, not just
+the visible one. All thirteen run on every click.
 
-Two things keep that bearable today, and both are deliberate. Everything
-expensive on the Quant Desk and in the Deal Room is behind a button and cached
-in session state, so an unopened model costs a function call rather than a
-solve. And the heavy fetches are `@st.cache_data`.
+That inference is wrong, and this repo has the measurement to prove it.
+`profile_app.py` writes an instrumented copy of the app that reports, in its
+own status bar, where a rerun actually went. On a rerun that changed nothing
+(toggling explain mode):
 
-The next structural step, when the rail grows again, is a desk switcher above
-the tabs — Markets, Quant, Deals, Workspace — with the tab bodies guarded so
-only the active desk executes. That turns "every screen runs on every click"
-into "one desk runs", and it is the change to make before adding a fourteenth
-tab rather than after. Market News was removed as a
-top-level tab — it held one collapsed accordion on an otherwise empty screen —
-and now sits under the ticker-specific news in Analysis.
+| | before | after |
+| --- | --- | --- |
+| **Whole rerun** | **1,080ms** | **506ms** |
+| `if _analysis_run:` | 928ms | ~300ms |
+| — `historical_signal_check` | 349ms | 4ms |
+| — composite `scoring.backtest` | 346ms | ~10ms |
+| All 13 tab bodies combined | ~130ms | ~130ms |
+
+The entire tab rail was 12% of a rerun. Two uncached backtests were 64% of it.
+Both are pure, deterministic functions — the block bootstrap is seeded — and
+both were re-running on every single interaction anywhere in the app, including
+toggling a text setting. Adding `@st.cache_data` to the two of them cut every
+click roughly in half.
+
+So the desk switcher is *not* the next structural step. It would have meant
+re-indenting several thousand lines to reclaim about 120ms, and the version of
+this README written before the measurement said to do exactly that. Ten
+minutes with the profiler replaced it with a twelve-line change. If the rail
+grows again, split it for **navigability** — thirteen labels is a lot to scan —
+and not for speed, because speed is not where it costs.
+
+Two supporting habits keep the rest bearable, and both are deliberate.
+Everything expensive on the Quant Desk and in the Deal Room sits behind a
+button and caches into session state, so an unopened model costs a function
+call rather than a solve. And every network fetch is `@st.cache_data`.
+
+**Before optimising anything here, run the profiler.** The guess was wrong the
+first time by a factor of seven.
+
+### A note on measuring
+
+The first profiling run showed the cache making no difference at all, which
+looked like the fix had failed. It had not — the synthetic-data harness used
+for browser testing stubbed `load_daily_data` with a function keyed on
+`datetime.now()`, so every rerun produced a new price frame and every
+downstream cache missed by construction. Production's `load_daily_data` is
+`@st.cache_data(ttl=900)` and hands back an identical frame. The harness was
+measuring a situation the real app never has. Pinning the stub's end date made
+the measurement honest and the improvement appeared immediately.
 
 ## Mobile
 

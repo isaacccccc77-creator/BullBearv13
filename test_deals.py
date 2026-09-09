@@ -342,6 +342,20 @@ expect("a passed deal's memo says pass",
        "Recommendation: Pass" in deals.build_memo(
            "X", {}, bad, None, history, None, rec_bad), True)
 
+print("\nMemo escaping — the memo is rendered as markdown with HTML enabled,")
+print("so the three fields that come from outside are an HTML sink.")
+hostile = "<img src=x onerror=alert(1)>"
+evil_memo = deals.build_memo(
+    hostile, {"sector": hostile, "industry": "<script>alert(2)</script>"},
+    None, None, None, None, deals.recommendation(None, None, None))
+expect("the company name cannot inject a tag", "<img" in evil_memo, False)
+expect("nor can the sector", "<script>" in evil_memo, False)
+expect("but the text still shows", "&lt;img src=x" in evil_memo, True)
+expect("a normal name is untouched",
+       "Investment memo — Acme Industrial" in deals.build_memo(
+           "Acme Industrial", {}, None, None, None, None,
+           deals.recommendation(None, None, None)), True)
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): {', '.join(failures)}")

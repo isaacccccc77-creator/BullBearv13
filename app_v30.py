@@ -4080,6 +4080,27 @@ def explain_like_im_5(ticker_symbol: str, lean: str, news_items: list[dict]) -> 
 # ----------------------------------------------------------------------
 # 11. HISTORICAL SIGNAL CHECK (a fixed, honestly-caveated backtest)
 # ----------------------------------------------------------------------
+# scoring.backtest imports no Streamlit and must stay that way, so the
+# cache lives here rather than there. Same reason as above: a 500-sample
+# block bootstrap was re-running on every rerun, at ~350ms a time.
+#
+# ScoringConfig is an unfrozen dataclass and therefore unhashable, so the
+# key uses its repr — which a dataclass generates from every field, so
+# two configs that differ anywhere get different cache entries.
+@st.cache_data(ttl=3600, max_entries=64, show_spinner=False,
+               hash_funcs={scoring.ScoringConfig: repr})
+def cached_composite_backtest(score: pd.Series, close: pd.Series,
+                              forward_days: int, cfg) -> dict:
+    """Memoised scoring.backtest. Deterministic: the bootstrap is seeded."""
+    return scoring.backtest(score, close, forward_days, cfg)
+
+
+# Cached because it is pure, deterministic and expensive, and because
+# Streamlit re-executes this whole file on every interaction — toggling
+# explain mode used to re-run this bootstrap. Measured at ~350ms a call,
+# which was a third of every single click. Bounded entries so a long
+# session over many tickers cannot grow without limit.
+@st.cache_data(ttl=3600, max_entries=64, show_spinner=False)
 def historical_signal_check(daily_df: pd.DataFrame, forward_days: int = 5) -> dict | None:
     """
     Retrospectively checks whether the Indicator Lean's underlying score
@@ -5620,7 +5641,8 @@ makes ordinary regression p-values reject a true null roughly half the time.
                     "windows and a slow-moving score break the textbook ones."
                 )
                 with st.spinner("Backtesting..."):
-                    bt = scoring.backtest(composite_series, daily_df["Close"], horizon_bt, fs_cfg)
+                    bt = cached_composite_backtest(
+                        composite_series, daily_df["Close"], horizon_bt, fs_cfg)
 
                 if "error" in bt:
                     st.info(bt["error"])
@@ -6510,9 +6532,14 @@ def render_tombstone(cells: list) -> None:
 
     Each cell is (label, value, tone) where tone is "", "pos" or "neg".
     """
+    # `tone` lands in a class attribute rather than in text, so escaping is
+    # the wrong tool — a whitelist is. Every caller is in this file today,
+    # but an attribute sink one refactor away from a data-derived value is
+    # worth closing now rather than remembering later.
     body = "".join(
         f'<div class="tv-tomb-cell"><div class="tv-tomb-k">{html_lib.escape(str(k))}</div>'
-        f'<div class="tv-tomb-v {tone}">{html_lib.escape(str(v))}</div></div>'
+        f'<div class="tv-tomb-v {tone if tone in ("pos", "neg") else ""}">'
+        f'{html_lib.escape(str(v))}</div></div>'
         for k, v, tone in cells
     )
     st.markdown(f'<div class="tv-tombstone">{body}</div>', unsafe_allow_html=True)
