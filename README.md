@@ -90,6 +90,7 @@ written `0600`, with the mode set at creation rather than chmod-ed afterwards.
 | `test_quant.py` | The three quant models: null calibration, coverage, optimiser properties. |
 | `test_deals.py` | The deal models: identities, closed-form cases, monotonicities. |
 | `profile_app.py` | Writes an instrumented copy that reports where a rerun went. |
+| `test_layout.py` | Guards the responsive-layout bug class described under Mobile. |
 | `storage.py` | Persistence. JSON files or Postgres, chosen by `DATABASE_URL`. |
 | `scoring.py` | The composite score. No Streamlit import, so the maths is testable directly. |
 | `support.py` | Donation links. Validates and host-pins them; handles no money itself. |
@@ -535,6 +536,37 @@ measuring a situation the real app never has. Pinning the stub's end date made
 the measurement honest and the improvement appeared immediately.
 
 ## Mobile
+
+### Never centre with empty columns
+
+The sign-in screen was centred with `st.columns([1, 2, 1])` and two empty
+gutters. On a phone that produced a panel shoved off to the right with its
+tab rail scrolling sideways — and it looked perfect in a desktop browser
+narrowed to the same width, which is why it shipped.
+
+Streamlit lays columns out as a *wrapping* flex row and gives each column a
+minimum width. Below a certain container width the three no longer fit: the
+empty left gutter keeps its place on row one, the real panel is pushed to the
+right of it, and the right gutter wraps to a row of its own where nothing is
+visible. Whether it happens depends on the layout viewport landing above or
+below Streamlit's stacking threshold, and a desktop browser resized to 390px
+does not reproduce an actual phone's layout viewport.
+
+The fix is to centre with a measure instead — `st.container(key=...)` plus
+`max-width` and `margin-inline: auto`. There is no breakpoint to fall off and
+no empty siblings competing for the row, so it holds from 320px to a 4K
+monitor. `test_layout.py` fails the build if an empty-gutter column split
+reappears anywhere in the app.
+
+A related trap, worth knowing because it makes the first one so confusing: if
+*anything* on the page overflows horizontally, mobile Safari widens the layout
+viewport to contain it, and then every column layout on the page silently
+stops stacking. A layout bug that is really an overflow bug. `html, body`
+are now `overflow-x: clip` so that cannot happen.
+
+Verified with every tab open at 320, 390, 430, 820, 1280 and 1700px: no
+horizontal overflow, no exceptions, no console errors.
+
 
 The phone layout is a designed target, not a shrunken desktop. Three things
 break a Streamlit dashboard on a small screen, and each is fixed rather than

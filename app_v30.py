@@ -1275,6 +1275,29 @@ hr, [data-testid="stDivider"] hr {
     color: var(--text-500);
     font-weight: 500;
 }
+/* The sign-in panel, centred with a measure rather than with layout
+   columns. `st.container(key="tv_auth_panel")` renders `.st-key-tv_auth_panel`,
+   which is a stable hook that does not depend on DOM position. */
+.st-key-tv_auth_panel {
+    width: 100%;
+    max-width: 440px;
+    margin-left: auto !important;
+    margin-right: auto !important;
+}
+/* Two short tabs always fit, so the panel's rail never needs the scrolling
+   treatment the 13-tab main rail gets on a phone — and the scroll arrows
+   Streamlit overlays on a scrolling rail were clipping the labels. */
+.st-key-tv_auth_panel [role="tablist"] {
+    flex-wrap: wrap !important;
+    overflow-x: visible !important;
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+    -webkit-mask-image: none !important;
+    mask-image: none !important;
+}
+.st-key-tv_auth_panel [role="tablist"] button[aria-hidden="true"],
+.st-key-tv_auth_panel [data-testid="stTabsScrollButton"] { display: none !important; }
+
 .tv-auth-lede {
     font-family: var(--font-ui);
     font-size: 0.9rem;
@@ -1870,6 +1893,13 @@ hr, [data-testid="stDivider"] hr {
     .tv-verdict-r { font-size: 2.1rem; }
 }
 
+/* Nothing in this app is meant to scroll sideways at the page level. When
+   something does, mobile Safari widens the layout viewport to contain it,
+   and every column layout on the page silently stops stacking — the bug
+   looks like a layout bug and is actually an overflow bug. `clip` rather
+   than `hidden` so position:sticky keeps working inside. */
+html, body { max-width: 100%; overflow-x: clip; }
+
 @media (max-width: 768px) {
     /* --- Rhythm --- */
     [data-testid="stMainBlockContainer"], .block-container {
@@ -2114,8 +2144,23 @@ if not st.session_state.get("authenticated"):
         unsafe_allow_html=True,
     )
 
-    _gutter_l, _auth_col, _gutter_r = st.columns([1, 2, 1])
-    with _auth_col:
+    # Centred in CSS, not with st.columns.
+    #
+    # This used to be st.columns([1, 2, 1]) with empty gutters. Streamlit
+    # lays columns out as a wrapping flex row, and each column carries a
+    # minimum width; on a narrow screen the three of them no longer fit, so
+    # the *empty* left gutter keeps its place on row one, the panel is shoved
+    # to the right of it, and the right gutter wraps to a row of its own
+    # where nothing is visible. The panel ends up off-centre and squeezed
+    # hard enough that even a two-item tab rail starts to scroll sideways.
+    # Whether it happens at all depends on the layout viewport landing above
+    # or below Streamlit's stacking threshold, which is why it looked fine in
+    # a desktop browser narrowed to phone width and wrong on an actual phone.
+    #
+    # A max-width container cannot do that. There is no breakpoint to fall
+    # off, no empty siblings competing for the row, and it stays centred from
+    # 320px to a 4K monitor.
+    with st.container(key="tv_auth_panel"):
         login_tab, register_tab = st.tabs(["Sign in", "Create account"])
 
         with login_tab:
@@ -2233,8 +2278,9 @@ if totp_enabled and not st.session_state.get(f"totp_verified_{username}", False)
 """,
         unsafe_allow_html=True,
     )
-    _g1, _totp_col, _g2 = st.columns([1, 2, 1])
-    with _totp_col:
+    # Same centring as the sign-in panel, and for the same reason — see the
+    # note there. This screen had the identical empty-gutter column split.
+    with st.container(key="tv_auth_panel"):
         with card():
             code = st.text_input("Authentication code", key="totp_code_input")
             if st.button("Verify code", type="primary", use_container_width=True):
