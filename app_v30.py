@@ -20,6 +20,8 @@ import scoring
 import support
 import quant
 import deals
+import theming
+import payments
 
 # Stamped before any work happens so the status bar can report how long a
 # rerun actually took. Streamlit re-executes this entire file on every
@@ -240,6 +242,29 @@ st.set_page_config(page_title="Tickveil", page_icon="🕯️", layout="wide", in
 #     flourish. Where it's cheap, selectors are doubled up against both
 #     the current and previous test ids for exactly that reason.
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# THEME
+#
+# Resolved before any CSS is emitted, because the palette *is* the
+# stylesheet's variable block — there is no second pass to recolour a
+# page that has already been painted.
+#
+# The value lives in session state. It is loaded from the user's saved
+# preference at sign-in and written back when they change it, so the
+# unauthenticated screens use the house palette and everything after
+# login uses theirs. Streamlit has no cookie API, so a signed-out
+# visitor cannot be remembered — which is the right trade here, since
+# the alternative is a preference stored somewhere we cannot secure.
+# ----------------------------------------------------------------------
+ACTIVE_THEME = theming.resolve(st.session_state.get("theme"))
+THEME = theming.get_theme(ACTIVE_THEME)
+
+# Emitted before the main stylesheet so the variables exist when it is
+# parsed. Same raw-HTML rule applies: <style> on its own line.
+st.markdown(f"""<style>
+{theming.css_variables(ACTIVE_THEME)}
+</style>""", unsafe_allow_html=True)
+
 # The block below MUST begin with <style> on its own line. Markdown treats
 # <style> as a raw-HTML block that runs until its closing tag, so the blank
 # lines separating the sections inside it are safe. Leading it with anything
@@ -254,53 +279,6 @@ st.markdown("""<style>
    One place to change the whole product's look. Every rule below
    reads from these — no hard-coded hexes scattered through the sheet.
    ================================================================== */
-:root {
-    /* Surfaces: near-black, warm-shifted rather than pure grey */
-    --ink-950: #05070B;
-    --ink-900: #080A10;
-    --ink-850: #0B0E15;
-    --ink-800: #0E1219;
-    --ink-700: #141924;
-
-    /* Champagne — the single accent. Used sparingly, on purpose. */
-    --gold-300: #F2E2C1;
-    --gold-400: #E4CB9E;
-    --gold-500: #D4B078;
-    --gold-600: #B08B52;
-    --gold-grad: linear-gradient(135deg, #F6E9CE 0%, #E4CB9E 38%, #C39C61 72%, #A37F4A 100%);
-
-    /* Directional colours — muted, not neon. Jade up, rose down. */
-    --jade: #5FCF9B;
-    --jade-dim: rgba(95, 207, 155, 0.14);
-    --rose: #F0616F;
-    --rose-dim: rgba(240, 97, 111, 0.14);
-
-    /* Type */
-    --text-100: #F4F1EA;
-    --text-200: #DAD5CA;
-    --text-300: #ABA598;
-    --text-500: #7E786C;
-
-    /* Lines */
-    --line: rgba(255, 255, 255, 0.065);
-    --line-strong: rgba(255, 255, 255, 0.11);
-    --line-gold: rgba(212, 176, 120, 0.28);
-
-    /* Shadows: long, soft, low-opacity — expensive light behaves this way */
-    --shadow-sm: 0 2px 10px -4px rgba(0, 0, 0, 0.7);
-    --shadow-md: 0 18px 44px -24px rgba(0, 0, 0, 0.95);
-    --shadow-gold: 0 16px 40px -18px rgba(212, 176, 120, 0.35);
-
-    /* The house easing curve. Everything uses it. */
-    --ease: cubic-bezier(0.16, 1, 0.3, 1);
-
-    --radius: 16px;
-    --radius-sm: 11px;
-
-    --font-display: 'Fraunces', 'Iowan Old Style', Georgia, serif;
-    --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    --font-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
-}
 
 /* ==================================================================
    PAGE CANVAS — layered light, then grain
@@ -450,7 +428,7 @@ code, kbd {
     position: absolute;
     left: 0; right: 0; bottom: 0;
     height: 1px;
-    background: linear-gradient(90deg, var(--line-gold) 0%, rgba(255,255,255,0.05) 42%, transparent 88%);
+    background: linear-gradient(90deg, var(--line-gold) 0%, rgba(var(--tint-rgb), 0.05) 42%, transparent 88%);
 }
 .tv-brandrow {
     display: flex;
@@ -506,7 +484,7 @@ code, kbd {
     padding: 0.36rem 0.8rem;
     border-radius: 99px;
     border: 1px solid var(--line);
-    background: rgba(255, 255, 255, 0.035);
+    background: rgba(var(--tint-rgb), 0.035);
     font-family: var(--font-mono);
     font-size: 0.67rem;
     letter-spacing: 0.1em;
@@ -554,7 +532,7 @@ code, kbd {
     border: 1px solid var(--line) !important;
     border-radius: var(--radius) !important;
     padding: 1.15rem 1.25rem !important;
-    background: linear-gradient(158deg, rgba(255,255,255,0.042) 0%, rgba(255,255,255,0.012) 46%, rgba(255,255,255,0.004) 100%) !important;
+    background: linear-gradient(158deg, rgba(var(--tint-rgb), 0.042) 0%, rgba(var(--tint-rgb), 0.012) 46%, rgba(var(--tint-rgb), 0.004) 100%) !important;
     backdrop-filter: blur(14px);
     box-shadow: var(--shadow-sm);
     position: relative;
@@ -567,7 +545,7 @@ code, kbd {
     position: absolute;
     top: 0; left: 12%; right: 12%;
     height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.16), transparent);
+    background: linear-gradient(90deg, transparent, rgba(var(--tint-rgb), 0.16), transparent);
     pointer-events: none;
 }
 [data-testid="stVerticalBlockBorderWrapper"]:hover,
@@ -589,7 +567,7 @@ code, kbd {
     padding: 1.05rem 1.15rem 0.95rem;
     border-radius: var(--radius-sm);
     border: 1px solid var(--line);
-    background: linear-gradient(160deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.014) 100%);
+    background: linear-gradient(160deg, rgba(var(--tint-rgb), 0.05) 0%, rgba(var(--tint-rgb), 0.014) 100%);
     transition: transform 0.5s var(--ease), border-color 0.5s var(--ease), box-shadow 0.5s var(--ease);
     animation: reveal-up 0.6s var(--ease) both;
 }
@@ -653,7 +631,7 @@ code, kbd {
     gap: 4px !important;
     padding: 5px !important;
     border-radius: 14px;
-    background: rgba(255, 255, 255, 0.028);
+    background: rgba(var(--tint-rgb), 0.028);
     border: 1px solid var(--line);
     backdrop-filter: blur(12px);
     flex-wrap: wrap;
@@ -679,7 +657,7 @@ code, kbd {
 }
 [data-baseweb="tab"]:hover, [data-testid="stTab"]:hover, [role="tab"]:hover {
     color: var(--text-100) !important;
-    background: rgba(255, 255, 255, 0.05) !important;
+    background: rgba(var(--tint-rgb), 0.05) !important;
 }
 [data-baseweb="tab"][aria-selected="true"],
 [data-testid="stTab"][aria-selected="true"],
@@ -734,7 +712,7 @@ button[data-testid^="stBaseButton-"]::after {
     content: "";
     position: absolute;
     inset: 0;
-    background: linear-gradient(112deg, transparent 30%, rgba(255,255,255,0.26) 50%, transparent 70%);
+    background: linear-gradient(112deg, transparent 30%, rgba(var(--tint-rgb), 0.26) 50%, transparent 70%);
     transform: translateX(-130%);
     transition: transform 0.85s var(--ease);
     pointer-events: none;
@@ -798,7 +776,7 @@ button[data-testid="stBaseButton-primaryFormSubmit"]:hover p { color: #0A0C11 !i
 [data-testid="stDateInputField"],
 [data-testid="stSelectbox"] > div > div,
 [data-baseweb="select"] > div, [data-baseweb="input"], [data-baseweb="textarea"] {
-    background: rgba(255, 255, 255, 0.035) !important;
+    background: rgba(var(--tint-rgb), 0.035) !important;
     border: 1px solid var(--line) !important;
     border-radius: 10px !important;
     color: var(--text-100) !important;
@@ -812,7 +790,7 @@ button[data-testid="stBaseButton-primaryFormSubmit"]:hover p { color: #0A0C11 !i
 [data-baseweb="select"] > div:focus-within {
     border-color: rgba(212, 176, 120, 0.55) !important;
     box-shadow: 0 0 0 3px rgba(212, 176, 120, 0.12) !important;
-    background: rgba(255, 255, 255, 0.055) !important;
+    background: rgba(var(--tint-rgb), 0.055) !important;
 }
 /* The controls themselves stay transparent so only the shell shows a border */
 input, textarea, select {
@@ -844,7 +822,7 @@ label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {
     color: var(--gold-300) !important;
 }
 [data-testid="portal"] [role="listbox"] {
-    background: rgba(11, 14, 21, 0.97) !important;
+    background: color-mix(in srgb, var(--ink-850) 97%, transparent) !important;
     border: 1px solid var(--line-gold) !important;
     border-radius: 12px !important;
     backdrop-filter: blur(18px);
@@ -867,7 +845,7 @@ label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {
     border: 1px solid var(--line) !important;
     border-radius: var(--radius) !important;
     padding: 1.4rem !important;
-    background: linear-gradient(158deg, rgba(255,255,255,0.045), rgba(255,255,255,0.012));
+    background: linear-gradient(158deg, rgba(var(--tint-rgb), 0.045), rgba(var(--tint-rgb), 0.012));
     backdrop-filter: blur(14px);
     box-shadow: var(--shadow-sm);
     animation: reveal-up 0.6s var(--ease) both;
@@ -876,7 +854,7 @@ label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {
 [data-testid="stExpander"] details, [data-testid="stExpander"] {
     border: 1px solid var(--line) !important;
     border-radius: var(--radius-sm) !important;
-    background: rgba(255, 255, 255, 0.024) !important;
+    background: rgba(var(--tint-rgb), 0.024) !important;
     overflow: hidden;
     transition: border-color 0.45s var(--ease), background 0.45s var(--ease);
 }
@@ -908,7 +886,7 @@ label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {
     border-radius: var(--radius-sm) !important;
     border: 1px solid var(--line) !important;
     border-left: 2px solid var(--gold-500) !important;
-    background: rgba(255, 255, 255, 0.032) !important;
+    background: rgba(var(--tint-rgb), 0.032) !important;
     backdrop-filter: blur(10px);
     color: var(--text-200) !important;
     animation: fade-slide 0.5s var(--ease) both;
@@ -916,7 +894,7 @@ label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {
 [data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]) { border-left-color: var(--jade) !important; }
 [data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"])   { border-left-color: var(--rose) !important; }
 [data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]) { border-left-color: var(--gold-500) !important; }
-[data-testid="stAlertContainer"]:has([data-testid="stAlertContentInfo"])    { border-left-color: rgba(255,255,255,0.22) !important; }
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentInfo"])    { border-left-color: rgba(var(--tint-rgb), 0.22) !important; }
 [data-testid="stAlert"] p, [data-testid="stAlertContainer"] p {
     color: var(--text-200) !important;
     font-size: 0.855rem !important;
@@ -927,7 +905,7 @@ label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {
     border: 1px solid var(--line) !important;
     border-radius: var(--radius-sm) !important;
     overflow: hidden;
-    background: rgba(255, 255, 255, 0.018);
+    background: rgba(var(--tint-rgb), 0.018);
 }
 [data-testid="stDataFrame"] [role="gridcell"], [data-testid="stDataFrame"] [role="columnheader"] {
     font-family: var(--font-mono) !important;
@@ -946,7 +924,7 @@ hr, [data-testid="stDivider"] hr {
 [data-testid="stPlotlyChart"] {
     border: 1px solid var(--line);
     border-radius: var(--radius);
-    background: linear-gradient(160deg, rgba(255,255,255,0.032), rgba(255,255,255,0.008));
+    background: linear-gradient(160deg, rgba(var(--tint-rgb), 0.032), rgba(var(--tint-rgb), 0.008));
     padding: 0.55rem;
     box-shadow: var(--shadow-sm);
     animation: reveal-up 0.7s var(--ease) both;
@@ -1007,7 +985,7 @@ hr, [data-testid="stDivider"] hr {
     margin: 0.5rem 0 1.15rem;
     border: 1px solid var(--line);
     border-radius: var(--radius);
-    background: linear-gradient(120deg, rgba(212,176,120,0.075) 0%, rgba(255,255,255,0.028) 34%, rgba(255,255,255,0.01) 100%);
+    background: linear-gradient(120deg, rgba(212,176,120,0.075) 0%, rgba(var(--tint-rgb), 0.028) 34%, rgba(var(--tint-rgb), 0.01) 100%);
     backdrop-filter: blur(16px);
     box-shadow: var(--shadow-sm);
     position: relative;
@@ -1092,7 +1070,7 @@ hr, [data-testid="stDivider"] hr {
     margin: 0.7rem 0 1rem;
     border-radius: var(--radius);
     border: 1px solid var(--line);
-    background: linear-gradient(140deg, rgba(255,255,255,0.05), rgba(255,255,255,0.012));
+    background: linear-gradient(140deg, rgba(var(--tint-rgb), 0.05), rgba(var(--tint-rgb), 0.012));
     backdrop-filter: blur(16px);
     box-shadow: var(--shadow-sm);
     animation: reveal-up 0.7s var(--ease) both;
@@ -1189,7 +1167,7 @@ hr, [data-testid="stDivider"] hr {
 .tv-bar-track {
     height: 5px;
     border-radius: 99px;
-    background: rgba(255, 255, 255, 0.06);
+    background: rgba(var(--tint-rgb), 0.06);
     overflow: hidden;
 }
 .tv-bar-fill {
@@ -1317,7 +1295,7 @@ hr, [data-testid="stDivider"] hr {
     padding: 0;
     border: 1px solid var(--line);
     border-radius: var(--radius-sm);
-    background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.012));
+    background: linear-gradient(180deg, rgba(var(--tint-rgb), 0.045), rgba(var(--tint-rgb), 0.012));
     backdrop-filter: blur(14px);
     box-shadow: var(--shadow-sm);
     overflow-x: auto;
@@ -1390,7 +1368,7 @@ hr, [data-testid="stDivider"] hr {
     position: absolute;
     left: 0; right: 0; bottom: 0;
     height: 1px;
-    background: linear-gradient(90deg, var(--gold-500), rgba(255,255,255,0.05) 45%, transparent 85%);
+    background: linear-gradient(90deg, var(--gold-500), rgba(var(--tint-rgb), 0.05) 45%, transparent 85%);
 }
 /* A single specular pass along the rule, on a long cycle. */
 .tv-desk-head::before {
@@ -1431,8 +1409,8 @@ hr, [data-testid="stDivider"] hr {
 /* Nested sub-tabs sit one level down visually, so the eye reads the outer
    rail as navigation and this as a mode switch within one surface. */
 [data-testid="stTabs"] [data-testid="stTabs"] [role="tablist"] {
-    background: rgba(255, 255, 255, 0.018);
-    border-color: rgba(255, 255, 255, 0.045);
+    background: rgba(var(--tint-rgb), 0.018);
+    border-color: rgba(var(--tint-rgb), 0.045);
     padding: 4px !important;
 }
 [data-testid="stTabs"] [data-testid="stTabs"] [role="tab"] p {
@@ -1455,6 +1433,122 @@ hr, [data-testid="stDivider"] hr {
     0%        { left: -22%; opacity: 0; }
     12%       { opacity: 1; }
     55%, 100% { left: 100%; opacity: 0; }
+}
+
+/* --- The page itself ----------------------------------------------
+   config.toml paints the app background and cannot change at runtime, so
+   on a light palette the page would stay near-black behind every themed
+   surface. These rules hand the background to the palette instead. The
+   selectors are doubled against Streamlit's current and previous test ids
+   for the usual reason. */
+html, body,
+.stApp, [data-testid="stApp"],
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"], .main,
+[data-testid="stHeader"],
+[data-testid="stBottomBlockContainer"] {
+    background-color: var(--ink-950) !important;
+}
+[data-testid="stHeader"] { background: transparent !important; }
+body { color: var(--text-200); }
+
+/* --- Sign-in: what is inside ---------------------------------------
+   A belt of capability cards below the form. Grid rather than columns, so
+   it reflows from four across to one without a breakpoint deciding when —
+   auto-fit does it on available width, which is the thing that actually
+   matters. */
+.tv-auth-trust {
+    text-align: center;
+    margin-top: 1.4rem;
+    font-family: var(--font-ui);
+    font-size: 0.62rem;
+    letter-spacing: 0.17em;
+    text-transform: uppercase;
+    color: var(--text-500);
+    line-height: 1.9;
+}
+.tv-auth-belt {
+    max-width: 1040px;
+    margin: 3.4rem auto 1rem;
+    padding: 0 0.4rem;
+    animation: reveal-up 0.8s var(--ease) both;
+    animation-delay: 0.12s;
+}
+.tv-auth-belt-rule {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--line-gold) 28%,
+                                var(--line-gold) 72%, transparent);
+}
+.tv-auth-belt-eyebrow {
+    text-align: center;
+    margin-top: 1.5rem;
+    font-family: var(--font-ui);
+    font-size: 0.56rem;
+    font-weight: 600;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: var(--gold-500);
+}
+.tv-auth-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(226px, 1fr));
+    gap: 0.9rem;
+    margin-top: 1.5rem;
+}
+.tv-auth-cell {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 1.15rem 1.15rem 1.25rem;
+    background: linear-gradient(180deg,
+        rgba(var(--tint-rgb), 0.028), rgba(var(--tint-rgb), 0.008));
+    transition: border-color 0.5s var(--ease), transform 0.5s var(--ease);
+}
+.tv-auth-cell:hover {
+    border-color: var(--line-gold);
+    transform: translateY(-2px);
+}
+.tv-auth-cell-k {
+    font-family: var(--font-ui);
+    font-size: 0.56rem;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--gold-500);
+    margin-bottom: 0.55rem;
+}
+.tv-auth-cell-v {
+    font-family: var(--font-ui);
+    font-size: 0.8rem;
+    line-height: 1.62;
+    color: var(--text-300);
+}
+.tv-auth-foot {
+    text-align: center;
+    margin-top: 2rem;
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-500);
+}
+@media (max-width: 640px) {
+    .tv-auth-belt { margin-top: 2.4rem; }
+    .tv-auth-cell { padding: 0.95rem 1rem 1.05rem; }
+    .tv-auth-cell-v { font-size: 0.82rem; }
+}
+
+/* --- Theme swatches (Settings → Appearance) ---------------------- */
+.tv-swatches { display: flex; flex-wrap: wrap; gap: 0.9rem; margin: 0.9rem 0 0.3rem; }
+.tv-swatch { display: flex; flex-direction: column; align-items: center; gap: 0.38rem; }
+.tv-swatch span {
+    width: 46px; height: 32px; border-radius: 8px; display: block;
+    border: 1px solid rgba(var(--tint-rgb), 0.16);
+    box-shadow: var(--shadow-sm);
+}
+.tv-swatch em {
+    font-family: var(--font-ui); font-style: normal;
+    font-size: 0.52rem; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--text-500);
 }
 
 /* ==================================================================
@@ -1512,7 +1606,7 @@ hr, [data-testid="stDivider"] hr {
     height: 1px;
     min-width: 1.5rem;
     transform: translateY(-0.18rem);
-    background-image: radial-gradient(circle, rgba(255,255,255,0.24) 0.6px, transparent 0.7px);
+    background-image: radial-gradient(circle, rgba(var(--tint-rgb), 0.24) 0.6px, transparent 0.7px);
     background-size: 5px 1px;
     background-repeat: repeat-x;
 }
@@ -1526,7 +1620,7 @@ hr, [data-testid="stDivider"] hr {
 .tv-ledger-row.total {
     margin-top: 0.35rem;
     padding-top: 0.6rem;
-    border-top: 1px solid rgba(255, 255, 255, 0.10);
+    border-top: 1px solid rgba(var(--tint-rgb), 0.10);
 }
 .tv-ledger-row.total .tv-ledger-label { color: var(--text-100); font-weight: 600; }
 .tv-ledger-row.total .tv-ledger-value { color: var(--gold-300); font-weight: 600; }
@@ -1548,9 +1642,9 @@ hr, [data-testid="stDivider"] hr {
 .tv-tomb-cell {
     flex: 1 1 130px;
     padding: 0.7rem 0.85rem;
-    border: 1px solid rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(var(--tint-rgb), 0.07);
     border-radius: 10px;
-    background: linear-gradient(180deg, rgba(255,255,255,0.028), rgba(255,255,255,0.008));
+    background: linear-gradient(180deg, rgba(var(--tint-rgb), 0.028), rgba(var(--tint-rgb), 0.008));
     animation: metric-in 0.55s var(--ease) both;
 }
 .tv-tomb-cell:nth-child(2) { animation-delay: 0.06s; }
@@ -1599,7 +1693,7 @@ hr, [data-testid="stDivider"] hr {
     transform: rotate(-2.4deg);
     animation: stamp-in 0.62s cubic-bezier(.2,1.5,.4,1) both;
     box-shadow: 0 0 32px -12px var(--stamp), inset 0 0 22px -16px var(--stamp);
-    background: rgba(255, 255, 255, 0.012);
+    background: rgba(var(--tint-rgb), 0.012);
 }
 .tv-stamp-verdict {
     font-family: var(--font-ui);
@@ -1627,11 +1721,11 @@ hr, [data-testid="stDivider"] hr {
    characters, because the memo is the one screen in the app someone
    reads top to bottom rather than scans. */
 .tv-memo {
-    border: 1px solid rgba(255, 255, 255, 0.075);
+    border: 1px solid rgba(var(--tint-rgb), 0.075);
     border-radius: 14px;
     background:
         radial-gradient(120% 60% at 50% 0%, rgba(212,176,120,0.045), transparent 60%),
-        linear-gradient(180deg, rgba(255,255,255,0.022), rgba(255,255,255,0.006));
+        linear-gradient(180deg, rgba(var(--tint-rgb), 0.022), rgba(var(--tint-rgb), 0.006));
     padding: 2rem 2.2rem 2.2rem;
     animation: reveal-up 0.7s var(--ease) both;
 }
@@ -1645,7 +1739,7 @@ hr, [data-testid="stDivider"] hr {
     font-size: 1.02rem !important;
     margin: 1.6rem 0 0.55rem !important;
     padding-bottom: 0.3rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    border-bottom: 1px solid rgba(var(--tint-rgb), 0.07);
 }
 .tv-memo p, .tv-memo li {
     font-family: var(--font-ui) !important;
@@ -1656,7 +1750,7 @@ hr, [data-testid="stDivider"] hr {
 }
 .tv-memo strong { color: var(--text-100) !important; }
 .tv-memo em { color: var(--text-500) !important; }
-.tv-memo hr { border-color: rgba(255, 255, 255, 0.07) !important; }
+.tv-memo hr { border-color: rgba(var(--tint-rgb), 0.07) !important; }
 
 /* --- Phone ---------------------------------------------------------- */
 @media (max-width: 640px) {
@@ -1693,7 +1787,7 @@ hr, [data-testid="stDivider"] hr {
     padding: 1.05rem 1.15rem;
     border-radius: var(--radius-sm);
     border: 1px solid var(--line);
-    background: linear-gradient(155deg, rgba(255,255,255,0.05), rgba(255,255,255,0.014));
+    background: linear-gradient(155deg, rgba(var(--tint-rgb), 0.05), rgba(var(--tint-rgb), 0.014));
     text-decoration: none !important;
     transition: transform 0.4s var(--ease), border-color 0.4s var(--ease),
                 box-shadow 0.4s var(--ease), background 0.4s var(--ease);
@@ -1702,7 +1796,7 @@ hr, [data-testid="stDivider"] hr {
 .tv-support-btn:hover {
     transform: translateY(-3px);
     border-color: var(--line-gold);
-    background: linear-gradient(155deg, rgba(212,176,120,0.10), rgba(255,255,255,0.02));
+    background: linear-gradient(155deg, rgba(212,176,120,0.10), rgba(var(--tint-rgb), 0.02));
     box-shadow: var(--shadow-md);
     text-decoration: none !important;
 }
@@ -1799,7 +1893,7 @@ hr, [data-testid="stDivider"] hr {
     gap: 0.75rem;
     padding: 0.4rem 1.1rem;
     border-top: 1px solid var(--line-gold);
-    background: rgba(5, 7, 11, 0.975);
+    background: color-mix(in srgb, var(--ink-950) 97%, transparent);
     backdrop-filter: blur(20px);
     font-family: var(--font-mono);
     font-size: 0.63rem;
@@ -2192,6 +2286,10 @@ if not st.session_state.get("authenticated"):
                         st.session_state["authenticated"] = True
                         st.session_state["username"] = login_username
                         st.session_state["name"] = user_record.get("name", login_username)
+                        # Their palette, applied from the first painted frame
+                        # after login rather than a rerun later.
+                        _prefs = store.get_doc(login_username, "preferences", {}) or {}
+                        st.session_state["theme"] = theming.resolve(_prefs.get("theme"))
                         st.rerun()
                     else:
                         note_login_failure(login_username)
@@ -2242,12 +2340,56 @@ if not st.session_state.get("authenticated"):
                     else:
                         st.error("That username was just taken — try another.")
 
+        # The trust line sits inside the panel, under the form, because it
+        # is answering the question the form just raised.
         st.markdown(
-            '<div style="text-align:center;margin-top:1.6rem;font-family:Inter,sans-serif;'
-            'font-size:0.66rem;letter-spacing:0.2em;text-transform:uppercase;color:#7E786C;">'
-            'Passwords hashed with bcrypt · Optional TOTP two-factor</div>',
+            '<div class="tv-auth-trust">'
+            'Passwords hashed with bcrypt · Optional TOTP two-factor · '
+            'No card details ever stored</div>',
             unsafe_allow_html=True,
         )
+
+    # Everything below the panel is for someone who has not seen the product
+    # before. A returning user reaches the form without scrolling past any
+    # of it; a first-time visitor scrolls once and finds out what this is.
+    st.markdown(
+        """
+<div class="tv-auth-belt">
+  <div class="tv-auth-belt-rule"></div>
+  <div class="tv-auth-belt-eyebrow">What is inside</div>
+  <div class="tv-auth-grid">
+    <div class="tv-auth-cell">
+      <div class="tv-auth-cell-k">Market desk</div>
+      <div class="tv-auth-cell-v">Price action, indicators and fundamentals, with a
+        composite score that is backtested against its own null — the bootstrap
+        p-value is shown next to the naive one, not instead of it.</div>
+    </div>
+    <div class="tv-auth-cell">
+      <div class="tv-auth-cell-k">Quant desk</div>
+      <div class="tv-auth-cell-v">Cointegration pairs on simulated Engle–Granger
+        critical values, Value at Risk with a Kupiec coverage test, and portfolio
+        optimisation scored on data it never saw.</div>
+    </div>
+    <div class="tv-auth-cell">
+      <div class="tv-auth-cell-k">Deal room</div>
+      <div class="tv-auth-cell-v">A leveraged buyout with its value bridge, M&amp;A
+        accretion with the breakeven synergy that matters more, trading
+        comparables, and the investment memo that assembles them.</div>
+    </div>
+    <div class="tv-auth-cell">
+      <div class="tv-auth-cell-k">Explain mode</div>
+      <div class="tv-auth-cell-v">On by default. Every dense panel carries a
+        plain-English note saying what the number means — and what it does not
+        mean. One toggle collapses all of it.</div>
+    </div>
+  </div>
+  <div class="tv-auth-foot">
+    Educational tool · Not investment advice · Public, delayed market data
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     st.stop()
 
@@ -2709,6 +2851,65 @@ with tab_watchlist:
         save_watchlist(st.session_state.watchlist_text)
 
 with tab_settings:
+    # ------------------------------------------------------------------
+    # APPEARANCE
+    #
+    # Five palettes rather than a colour picker. An arbitrary hue chosen by
+    # a reader cannot be checked for contrast, and this is a screen people
+    # read numbers off — every palette here is asserted against WCAG AA in
+    # test_theming.py before it ships.
+    #
+    # What changes is the surface and the accent. Green stays up and red
+    # stays down in all five, because relearning directional colour per
+    # theme is a real cost in a finance product and a saved preference is
+    # not worth paying it.
+    # ------------------------------------------------------------------
+    st.subheader("Appearance")
+    explain(
+        "Pick how the terminal looks. Only the background and the accent change — "
+        "green still means up and red still means down in every one of them, so "
+        "nothing you have learned to read stops being true."
+    )
+
+    _theme_keys = theming.theme_names()
+    _current = theming.resolve(st.session_state.get("theme"))
+    _picked = st.radio(
+        "Theme",
+        options=_theme_keys,
+        index=_theme_keys.index(_current),
+        format_func=lambda k: f"{theming.get_theme(k)['label']} — {theming.get_theme(k)['blurb']}",
+        key="theme_picker",
+    )
+    if _picked != _current:
+        st.session_state["theme"] = _picked
+        _user = st.session_state.get("username")
+        if _user:
+            _prefs = store.get_doc(_user, "preferences", {}) or {}
+            _prefs["theme"] = _picked
+            store.put_doc(_user, "preferences", _prefs)
+        st.rerun()
+
+    # A live strip of the palette, so the choice is visible without having
+    # to navigate away and come back.
+    _t = theming.get_theme(_current)
+    st.markdown(
+        '<div class="tv-swatches">'
+        + "".join(
+            f'<div class="tv-swatch"><span style="background:{c}"></span>'
+            f'<em>{n}</em></div>'
+            for n, c in [("page", _t["ink_950"]), ("surface", _t["ink_800"]),
+                         ("accent", _t["accent_500"]), ("up", _t["jade"]),
+                         ("down", _t["rose"]), ("text", _t["text_100"])])
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Saved to your account, so it follows you to any device you sign in on."
+        if st.session_state.get("username") else
+        "Sign in to save this between visits."
+    )
+
+    st.divider()
     st.subheader("Telegram alerts")
     if "telegram_creds_loaded" not in st.session_state:
         _saved_tg = load_saved_telegram()
@@ -3353,13 +3554,26 @@ def render_quote_strip(ticker_symbol: str, rt: dict, fundamentals: dict, currenc
 # they sit on. Legends go above the plot as a single row so they never
 # cover data.
 # ----------------------------------------------------------------------
-CHART_GOLD = "#D4B078"
-CHART_GOLD_SOFT = "#8C7B5C"  # muted champagne — the slower average sits behind the faster one
-CHART_JADE = "#5FCF9B"
-CHART_ROSE = "#F0616F"
-CHART_TEXT = "#ABA598"
-CHART_MUTED = "#7E786C"
-CHART_GRID = "rgba(255,255,255,0.055)"
+# Charts cannot read CSS variables — Plotly serialises real colour strings
+# into the figure, so `var(--gold-500)` would reach the renderer verbatim
+# and be dropped. The palette is therefore handed over as literals, derived
+# from the same theme the stylesheet was built from.
+_PAL = theming.chart_palette(ACTIVE_THEME)
+CHART_GOLD = _PAL["gold"]
+CHART_GOLD_SOFT = _PAL["gold_soft"]   # the slower average sits behind the faster one
+CHART_JADE = _PAL["jade"]
+CHART_ROSE = _PAL["rose"]
+CHART_AZURE = _PAL["azure"]
+CHART_TEXT = _PAL["text"]
+CHART_MUTED = _PAL["muted"]
+CHART_STRONG = _PAL["strong"]
+CHART_GRID = _PAL["grid"]
+CHART_AXIS = _PAL["axis"]
+
+
+def chart_tint(alpha: float) -> str:
+    """An overlay colour for chart marks, flipped for the light theme."""
+    return theming.tint(ACTIVE_THEME, alpha)
 
 
 def style_chart(fig: go.Figure, height: int = 500, show_legend: bool = True) -> go.Figure:
@@ -3377,9 +3591,9 @@ def style_chart(fig: go.Figure, height: int = 500, show_legend: bool = True) -> 
         font=dict(family="Inter, sans-serif", size=12, color=CHART_TEXT),
         hovermode="x unified",
         hoverlabel=dict(
-            bgcolor="rgba(11,14,21,0.95)",
+            bgcolor=_PAL["hover_bg"],
             bordercolor="rgba(212,176,120,0.35)",
-            font=dict(family="JetBrains Mono, monospace", size=11, color="#F4F1EA"),
+            font=dict(family="JetBrains Mono, monospace", size=11, color=CHART_STRONG),
         ),
         showlegend=show_legend,
         legend=dict(
@@ -3389,7 +3603,7 @@ def style_chart(fig: go.Figure, height: int = 500, show_legend: bool = True) -> 
         ),
         xaxis=dict(
             showgrid=False, zeroline=False,
-            linecolor="rgba(255,255,255,0.09)",
+            linecolor=CHART_AXIS,
             tickfont=dict(family="JetBrains Mono, monospace", size=10, color=CHART_MUTED),
             rangeslider_visible=False, automargin=True,
             showspikes=True, spikemode="across", spikethickness=1,
@@ -5265,7 +5479,7 @@ if _analysis_run:
                         pill_style = {
                             "positive": "color:#5FCF9B;background:rgba(95,207,155,0.12);border-color:rgba(95,207,155,0.28)",
                             "negative": "color:#F0616F;background:rgba(240,97,111,0.12);border-color:rgba(240,97,111,0.28)",
-                            "neutral": "color:#ABA598;background:rgba(255,255,255,0.05);border-color:rgba(255,255,255,0.10)",
+                            "neutral": f"color:{CHART_TEXT};background:{chart_tint(0.05)};border-color:{chart_tint(0.10)}",
                         }[sentiment]
                         st.markdown(
                             f'<span style="display:inline-block;padding:0.2rem 0.6rem;border-radius:99px;'
@@ -5631,7 +5845,7 @@ makes ordinary regression p-values reject a true null roughly half the time.
                                           (-fs_cfg.strong_threshold, CHART_ROSE)):
                         hist_fig.add_hline(y=level, line=dict(color=colour, width=1, dash="dot"),
                                            opacity=0.5)
-                    hist_fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.18)", width=1))
+                    hist_fig.add_hline(y=0, line=dict(color=chart_tint(0.18), width=1))
                     st.plotly_chart(style_chart(hist_fig, height=300, show_legend=False),
                                     use_container_width=True)
 
@@ -6077,7 +6291,7 @@ with tab_quant:
             ))
             for level in (used_entry, -used_entry):
                 z_fig.add_hline(y=level, line=dict(color="rgba(212,176,120,0.45)", width=1, dash="dot"))
-            z_fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.22)", width=1))
+            z_fig.add_hline(y=0, line=dict(color=chart_tint(0.22), width=1))
             st.plotly_chart(style_chart(z_fig, height=320, show_legend=False),
                             use_container_width=True)
 
@@ -6128,7 +6342,7 @@ after the fix is **4.4%**.
                     line=dict(width=1.8, color=CHART_JADE, shape="spline", smoothing=0.3),
                     fill="tozeroy", fillcolor="rgba(95,207,155,0.08)",
                 ))
-                eq_fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.2)", width=1))
+                eq_fig.add_hline(y=0, line=dict(color=chart_tint(0.2), width=1))
                 st.plotly_chart(style_chart(eq_fig, height=260, show_legend=False),
                                 use_container_width=True)
                 st.warning(
@@ -6425,18 +6639,18 @@ after the fix is **4.4%**.
                 # the plot and get sliced mid-word on a phone.
                 textposition="middle left", cliponaxis=False,
                 textfont=dict(size=9, color=CHART_MUTED),
-                marker=dict(size=7, color="rgba(255,255,255,0.30)",
-                            line=dict(width=1, color="rgba(255,255,255,0.45)")),
+                marker=dict(size=7, color=chart_tint(0.30),
+                            line=dict(width=1, color=chart_tint(0.45))),
             ))
             tone_map = {"Maximum Sharpe": CHART_GOLD, "Minimum variance": CHART_JADE,
-                        "Risk parity": "#8FB8E8", "Equal weight": CHART_ROSE}
+                        "Risk parity": CHART_AZURE, "Equal weight": CHART_ROSE}
             for _, row in summary.iterrows():
                 f_fig.add_trace(go.Scatter(
                     x=[row["In-sample vol %"]], y=[row["In-sample return %"]],
                     mode="markers", name=str(row["Portfolio"]),
                     marker=dict(size=15, symbol="diamond",
                                 color=tone_map.get(row["Portfolio"], CHART_GOLD),
-                                line=dict(width=1.5, color="rgba(10,12,17,0.85)")),
+                                line=dict(width=1.5, color=_PAL["hover_bg"])),
                 ))
             f_fig.update_xaxes(title_text="Annualised volatility %")
             # The theme parks the y-axis on the right with a margin sized for
@@ -6614,7 +6828,7 @@ def waterfall_chart(labels: list, values: list, title_y: str, height: int = 380)
         orientation="v", measure=measures, x=labels, y=values,
         text=[fmt_money(v) for v in values], textposition="outside",
         textfont=dict(family="JetBrains Mono, monospace", size=10, color=CHART_TEXT),
-        connector=dict(line=dict(color="rgba(255,255,255,0.14)", width=1, dash="dot")),
+        connector=dict(line=dict(color=chart_tint(0.14), width=1, dash="dot")),
         increasing=dict(marker=dict(color="rgba(95,207,155,0.55)",
                                     line=dict(color=CHART_JADE, width=1.2))),
         decreasing=dict(marker=dict(color="rgba(240,97,111,0.5)",
@@ -7240,7 +7454,7 @@ with tab_deals:
                     ff.add_trace(go.Scatter(
                         x=[row["Mid"]], y=[row["Method"]], mode="markers",
                         marker=dict(symbol="line-ns", size=20,
-                                    line=dict(color="#F4F1EA", width=2)),
+                                    line=dict(color=CHART_STRONG, width=2)),
                         showlegend=False, hoverinfo="skip",
                     ))
                 ff.add_vline(
@@ -7344,10 +7558,10 @@ with tab_deals:
                 "just different companies to own."
             )
             m_fig = go.Figure()
-            for column, colour in (("Gross margin %", "rgba(255,255,255,0.35)"),
+            for column, colour in (("Gross margin %", chart_tint(0.35)),
                                    ("EBITDA margin %", CHART_GOLD),
                                    ("Operating margin %", CHART_JADE),
-                                   ("Net margin %", "#8FB8E8")):
+                                   ("Net margin %", CHART_AZURE)):
                 if column in history and history[column].notna().any():
                     m_fig.add_trace(go.Scatter(
                         x=history["Year"], y=history[column], name=column.replace(" %", ""),
@@ -7379,7 +7593,7 @@ with tab_deals:
                 c_fig.add_trace(go.Scatter(
                     x=history["Year"], y=history["Cash conversion cycle"],
                     name="Cycle", mode="lines+markers",
-                    line=dict(color="#F4F1EA", width=2.4, shape="spline"),
+                    line=dict(color=CHART_STRONG, width=2.4, shape="spline"),
                     marker=dict(size=8),
                 ))
             style_chart(c_fig, height=380)
@@ -7522,6 +7736,78 @@ with tab_support:
     # touches this app, this server, or this database.
     # ----------------------------------------------------------------------
     st.subheader("Support Tickveil")
+
+    # --- PayNow -------------------------------------------------------
+    # Generated here rather than linked out, because PayNow has no hosted
+    # checkout to link to and the payload holds nothing sensitive — a
+    # payee proxy that is already public, and an amount. The payer scans
+    # it in their own banking app, which shows them the payee name their
+    # bank has on file before they confirm. See payments.py.
+    _paynow_proxy = support.read_config("SUPPORT_PAYNOW_PROXY")
+    _paynow_kind = support.read_config("SUPPORT_PAYNOW_TYPE") or "mobile"
+    _paynow_name = support.read_config("SUPPORT_PAYNOW_NAME") or "TICKVEIL"
+
+    if _paynow_proxy:
+        st.markdown("###### PayNow")
+        explain(
+            "Scan this with any Singapore banking app. It is a bank transfer, not "
+            "a card payment — nothing is charged until you confirm it inside your "
+            "own bank, and your bank will show you the payee name it has on file "
+            "before you do. No card details are involved anywhere."
+        )
+        _pn1, _pn2 = st.columns([1, 1])
+        with _pn1:
+            _amount = st.radio(
+                "Amount", ["Let me choose in my bank app", "S$3", "S$5", "S$10"],
+                key="paynow_amount", horizontal=False,
+            )
+        _amount_value = {"S$3": 3.0, "S$5": 5.0, "S$10": 10.0}.get(_amount)
+        try:
+            _payload = payments.paynow_payload(
+                _paynow_proxy,
+                proxy_type=(payments.PROXY_UEN if _paynow_kind.lower() == "uen"
+                            else payments.PROXY_MOBILE),
+                merchant_name=_paynow_name,
+                amount=_amount_value,
+                reference="TICKVEIL",
+            )
+        except payments.PayNowError as _e:
+            _payload = None
+            st.error(
+                f"The configured PayNow payee is not usable: {_e} "
+                "Fix SUPPORT_PAYNOW_PROXY and the code will reappear."
+            )
+        if _payload:
+            with _pn2:
+                st.image(payments.paynow_qr_png(_payload), width=210)
+            st.caption(
+                ("Fixed at " + _amount + ", locked so it cannot be edited."
+                 if _amount_value else
+                 "No amount set — your bank app will ask you for one.")
+                + "  Payee: " + _paynow_name + "."
+            )
+            with st.expander("What is actually in this QR code?"):
+                _fields = payments.parse_payload(_payload)
+                _acct = payments.parse_payload(_fields.get("26", ""))
+                st.markdown(
+                    "A QR code is only trustworthy if you can read it. This one "
+                    "says, in the EMVCo format every bank app understands:"
+                )
+                st.table({
+                    "Field": ["Scheme", "Payee", "Amount",
+                              "Amount editable", "Currency", "Country", "Checksum"],
+                    "Value": [_acct.get("00", "—"), _acct.get("02", "—"),
+                              _fields.get("54", "set in your bank app"),
+                              "no" if _acct.get("03") == "0" else "yes",
+                              "SGD (702)", _fields.get("58", "—"),
+                              _fields.get("63", "—") + (" — valid"
+                                  if payments.verify_payload(_payload) else " — INVALID")],
+                })
+                st.caption(
+                    "The checksum is computed over everything before it, so a QR "
+                    "altered in transit stops verifying. Your bank app checks it too."
+                )
+        st.divider()
 
     _links = support.configured_links()
 

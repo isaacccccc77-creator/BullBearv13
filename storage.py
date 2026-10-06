@@ -48,7 +48,10 @@ USERNAME_PATTERN = re.compile(r"^(?!\.)[A-Za-z0-9._-]{3,32}$")
 
 # The document kinds a user can own. Anything outside this set is rejected,
 # so a caller can never invent a key that escapes the data directory.
-DOC_KINDS = {"watchlist", "telegram", "journal", "digest_snapshot"}
+# Per-user documents. A whitelist, because the kind becomes part of a
+# filename on the JSON backend — see the path-traversal tests.
+DOC_KINDS = {"watchlist", "telegram", "journal", "digest_snapshot",
+             "preferences"}
 
 # Fields every account carries. Listed once so both backends agree on the
 # shape, and so a row written before billing existed still reads back with

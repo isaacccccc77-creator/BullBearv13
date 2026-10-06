@@ -160,6 +160,61 @@ else:
     finally:
         shutil.rmtree(legacy_dir, ignore_errors=True)
 
+
+# ----------------------------------------------------------------------
+# App ↔ storage contract
+#
+# Every storage method the app calls has to exist on BOTH backends. This
+# is the check that was missing when a theme preference was written with
+# store.set_doc(...) — a method that exists on neither. Nothing failed at
+# import, nothing failed at startup, and the AttributeError only appeared
+# when a user actually changed their theme, in a code path no test drove.
+# ----------------------------------------------------------------------
+import ast as _ast
+import os as _os
+
+_APP = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "app_v30.py")
+_tree = _ast.parse(open(_APP, encoding="utf-8").read())
+
+# Names the app binds to a storage backend.
+_STORE_NAMES = {"store", "get_store()"}
+_called = set()
+for _node in _ast.walk(_tree):
+    if (isinstance(_node, _ast.Call) and isinstance(_node.func, _ast.Attribute)
+            and isinstance(_node.func.value, _ast.Name)
+            and _node.func.value.id == "store"):
+        _called.add(_node.func.attr)
+
+print("\nEvery storage method the app calls exists on both backends.")
+print(f"  app calls: {', '.join(sorted(_called))}")
+for _backend in (storage.JSONStorage, storage.PostgresStorage):
+    _missing = sorted(m for m in _called if not hasattr(_backend, m))
+    expect(f"{_backend.__name__} implements them all", _missing, [])
+
+print("\nAnd both backends expose the same surface, so swapping the one")
+print("behind DATABASE_URL cannot change what the app can do.")
+# Deliberate asymmetries, each one a backend lifecycle concern rather
+# than something the app calls. Named explicitly so a new divergence
+# fails here instead of being absorbed by a loose comparison.
+_BACKEND_ONLY = {"ensure_schema"}   # Postgres migrates; JSON has no schema
+_public = lambda c: {m for m in dir(c) if not m.startswith("_")}
+expect("backend surfaces match",
+       sorted((_public(storage.JSONStorage) ^ _public(storage.PostgresStorage))
+              - _BACKEND_ONLY), [])
+expect("and the app never calls a backend-only method",
+       sorted(_called & _BACKEND_ONLY), [])
+
+print("\nEvery document kind the app reads or writes is whitelisted.")
+_kinds = set()
+for _node in _ast.walk(_tree):
+    if (isinstance(_node, _ast.Call) and isinstance(_node.func, _ast.Attribute)
+            and _node.func.attr in ("get_doc", "put_doc")
+            and len(_node.args) >= 2
+            and isinstance(_node.args[1], _ast.Constant)):
+        _kinds.add(_node.args[1].value)
+print(f"  kinds used: {', '.join(sorted(_kinds))}")
+expect("all kinds are whitelisted", sorted(_kinds - storage.DOC_KINDS), [])
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): {', '.join(failures)}")

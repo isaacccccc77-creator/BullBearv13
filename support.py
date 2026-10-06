@@ -69,7 +69,7 @@ PROVIDERS: dict[str, dict] = {
 }
 
 
-def _read_config(key: str) -> str:
+def read_config(key: str) -> str:
     """
     Environment first, then Streamlit secrets.
 
@@ -124,7 +124,7 @@ def configured_links() -> list[dict]:
     """
     out = []
     for provider_id, meta in PROVIDERS.items():
-        url = validate_link(_read_config(meta["key"]), meta["hosts"])
+        url = validate_link(read_config(meta["key"]), meta["hosts"])
         if url:
             out.append({"id": provider_id, "label": meta["label"],
                         "blurb": meta["blurb"], "url": url})
