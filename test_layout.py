@@ -87,6 +87,29 @@ for width in ("640px", "768px", "420px"):
     expect(f"@media (max-width: {width})",
            f"@media (max-width: {width})" in SOURCE, True)
 
+print("\nThe host's chrome stays removed. Streamlit paints a coloured strip,")
+print("a hamburger menu, a deploy button and a 'Made with Streamlit' footer;")
+print("none of them belong on a product with its own domain, and a Streamlit")
+print("upgrade that renames a test id would quietly bring them back.")
+for selector in ['#MainMenu', '[data-testid="stToolbar"]',
+                 '[data-testid="stDecoration"]', '[data-testid="stStatusWidget"]',
+                 '[data-testid="stAppDeployButton"]',
+                 'a[href^="https://streamlit.io"]']:
+    expect(f"hides {selector}", selector in SOURCE, True)
+expect("and the header is collapsed, not merely emptied",
+       'header[data-testid="stHeader"] {' in SOURCE, True)
+
+print("\nThe browser tab carries the product's own identity.")
+expect("a real page title", 'page_title="Tickveil — Market Intelligence Terminal"' in SOURCE, True)
+expect("a favicon asset, not an emoji", 'assets", "favicon.png"' in SOURCE, True)
+expect("with a fallback if the asset is missing",
+       'if os.path.exists(_ICON) else' in SOURCE, True)
+
+import os as _os
+_assets = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "assets")
+for _f in ("favicon.png", "apple-touch-icon.png", "favicon.ico"):
+    expect(f"assets/{_f} exists", _os.path.exists(_os.path.join(_assets, _f)), True)
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): {', '.join(failures)}")

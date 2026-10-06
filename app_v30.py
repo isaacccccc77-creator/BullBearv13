@@ -9,6 +9,7 @@ tension between different signals — they are not forecasts. This is not
 financial advice.
 """
 
+import os
 import re
 import time
 import io
@@ -199,7 +200,17 @@ def clear_login_failures(username_attempted: str) -> None:
     st.session_state.get("login_failures", {}).pop(username_attempted, None)
 
 
-st.set_page_config(page_title="Tickveil", page_icon="🕯️", layout="wide", initial_sidebar_state="collapsed")
+# The browser tab is the first thing that says whose product this is. An
+# emoji says "someone's Streamlit app"; a real mark says otherwise. Falls
+# back to the emoji if the asset is missing, so a partial checkout still runs.
+_ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "favicon.png")
+st.set_page_config(
+    page_title="Tickveil — Market Intelligence Terminal",
+    page_icon=_ICON if os.path.exists(_ICON) else "🕯️",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+    menu_items={"Get help": None, "Report a Bug": None, "About": None},
+)
 
 # ----------------------------------------------------------------------
 # 1b. VISUAL SYSTEM — "private wealth terminal"
@@ -1434,6 +1445,41 @@ hr, [data-testid="stDivider"] hr {
     0%        { left: -22%; opacity: 0; }
     12%       { opacity: 1; }
     55%, 100% { left: 100%; opacity: 0; }
+}
+
+/* ==================================================================
+   REMOVE THE HOST'S CHROME
+
+   Streamlit paints several things that announce which framework built
+   the page: a coloured gradient strip across the very top, a hamburger
+   menu, a "Manage app" pill, a running-status widget, a deploy button
+   and a "Made with Streamlit" footer. None of them belong on a product
+   with its own domain, and the top strip in particular is the single
+   most recognisable tell.
+
+   Selectors are doubled against current and legacy test ids, and the
+   class-prefix matches catch the hashed class names Streamlit Cloud
+   injects for its own badge, which change between releases.
+   ================================================================== */
+#MainMenu,
+header [data-testid="stToolbar"],
+[data-testid="stToolbarActions"],
+[data-testid="stDecoration"],
+[data-testid="stStatusWidget"],
+[data-testid="stAppDeployButton"],
+[data-testid="manage-app-button"],
+[data-testid="stAppViewBlockContainer"] > footer,
+div[class^="viewerBadge"], div[class*=" viewerBadge"],
+a[href^="https://streamlit.io"],
+footer {
+    display: none !important;
+    visibility: hidden !important;
+}
+/* The header element itself still reserves height once emptied. */
+header[data-testid="stHeader"] {
+    height: 0 !important;
+    min-height: 0 !important;
+    background: transparent !important;
 }
 
 /* --- The page itself ----------------------------------------------

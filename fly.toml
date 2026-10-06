@@ -1,0 +1,34 @@
+# Fly.io. `fly launch --no-deploy` then `fly deploy`.
+#
+# Region sin = Singapore. For a Singapore audience this is the single
+# biggest latency win available, and it is one line.
+
+app = "tickveil"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Streamlit holds a websocket per viewer; a machine that stops mid-session
+  # drops it. min_machines_running = 1 is what stops the cold start that
+  # makes a shared link look broken.
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "30s"
+    interval = "20s"
+    method = "GET"
+    timeout = "5s"
+    path = "/_stcore/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"   # pandas + plotly + scipy need more than the 256mb default

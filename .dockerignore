@@ -1,0 +1,14 @@
+.git
+.github
+__pycache__
+*.py[cod]
+.venv
+venv
+.streamlit/secrets.toml
+user_data/
+bullbear_*.json
+.test_data/
+pgdata/
+assets/*.psd
+*.md
+!README.md

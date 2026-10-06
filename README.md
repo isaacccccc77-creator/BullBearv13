@@ -104,6 +104,10 @@ written `0600`, with the mode set at creation rather than chmod-ed afterwards.
 | `deals.py` | LBO, M&A, comparables, value creation, memo. No Streamlit import. |
 | `.streamlit/config.toml` | Base theme (dark, champagne primary). |
 | `DEPLOY.md` | Launching on a domain: hosting, Postgres, OAuth, data feeds. |
+| `preflight.py` | Pre-launch check: what breaks if a domain is pointed here now. |
+| `Dockerfile` | Portable container, so the host stays a swappable decision. |
+| `fly.toml` / `render.yaml` | Preconfigured for Fly.io (sin region) and Render. |
+| `assets/` | Favicon and touch icon, drawn from the brand mark. |
 | `requirements.txt` | Dependencies. |
 
 ## What makes it different from a Bloomberg terminal

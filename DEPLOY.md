@@ -5,47 +5,69 @@ what it blocks, so you can stop partway and still have something working.
 
 ---
 
-## 0. The thing that decides everything else
+## 0. "Can it not be under Streamlit?"
 
-**Streamlit Community Cloud does not serve custom domains.** Your app
-lives at `something.streamlit.app` and there is no setting to change
-that. A CNAME pointed at it will not work, because the platform routes on
-the hostname it issued.
+Three different questions hide in that one, with three different answers.
 
-I could not re-verify this from inside the sandbox — `docs.streamlit.io`
-is blocked here — so check it yourself before acting on it: open your app
-in Streamlit Cloud, go to **Settings → General**, and look for any domain
-field. If there is none, the rest of this section applies. It has been
-true for as long as the platform has existed, but it is the kind of thing
-that changes, and it is cheap for you to confirm in ten seconds.
+### a) Not on a `*.streamlit.app` address — yes, and it is the main job here
 
-So "launch on a domain" means **moving off Community Cloud**. That is a
-good move anyway: Community Cloud sleeps idle apps, which for a visitor
-means a cold start of 30 seconds or more on a link you just shared.
+**Streamlit Community Cloud does not serve custom domains.** There is no
+setting; the platform routes on the hostname it issued, so a CNAME
+pointed at it will not work.
 
-### Where to move
+I could not re-verify that from inside the sandbox (`docs.streamlit.io`
+is blocked here), so confirm it in ten seconds before acting: Streamlit
+Cloud → your app → **Settings → General**, and look for a domain field.
+If there is none, this section applies.
+
+So putting Tickveil on `tickveil.com` means **moving host**. That is a
+good move regardless: Community Cloud sleeps idle apps, so a link you
+share cold-starts for 30 seconds or more.
+
+There is now a `Dockerfile` in the repo, which means the host is a
+decision you can change later without touching the app. `fly.toml` and
+`render.yaml` are also committed and preconfigured.
+
+### b) Not *looking* like a Streamlit app — done
+
+Streamlit paints several things that announce the framework: a coloured
+gradient strip across the very top, a hamburger menu, a "Manage app"
+pill, a running-status widget, a deploy button and a "Made with
+Streamlit" footer. All of them are now removed, and the browser tab
+carries a real favicon drawn from the brand mark instead of an emoji.
+
+Verified in a browser: zero Streamlit chrome elements in the DOM, and
+the word "streamlit" does not appear anywhere in the visible text of the
+page.
+
+The one thing you cannot remove is the websocket under the hood — if
+someone opens devtools they will see `/_stcore/stream`. No visitor does
+that, and no amount of CSS changes it.
+
+### c) Not *being* Streamlit at all — possible, but a rewrite
+
+If you mean a conventional web app (React or similar front end, FastAPI
+or Django behind it), that is a genuine rewrite of roughly 8,000 lines of
+UI. The models would survive untouched — `scoring.py`, `quant.py`,
+`deals.py`, `payments.py`, `theming.py` and `identity.py` all import no
+Streamlit, which was deliberate — but every screen would be rebuilt.
+
+Worth it eventually if the product grows. Not worth it to launch. What
+you would gain is finer control over layout and a faster first paint;
+what you would lose is weeks. With the chrome gone, nobody visiting
+`tickveil.com` will know or care.
+
+### Where to move (a)
 
 | Host | Cost to start | Custom domain | Sleeps? | Notes |
 |---|---|---|---|---|
-| **Render** (Web Service) | free tier, ~$7/mo for always-on | yes, free TLS | free tier does | Simplest move. Point it at the repo, set the start command. |
-| **Railway** | usage-based, ~$5/mo | yes, free TLS | no | Easiest Postgres story — database and app in one project. |
-| **Fly.io** | ~$3–5/mo | yes, free TLS | configurable | Closest region to Singapore (`sin`), which matters for latency. |
-| **Google Cloud Run** | pay-per-request, often <$5/mo | yes, via load balancer | scales to zero | You mentioned Google. Most fiddly of the four; the domain mapping goes through Cloud Run → Custom Domains. |
+| **Fly.io** | ~$3–5/mo | yes, free TLS | configurable | `sin` region is Singapore — the biggest latency win available, and it is one line in `fly.toml`. |
+| **Railway** | ~$5/mo usage | yes, free TLS | no | Easiest Postgres story: app and database in one project. |
+| **Render** | free, ~$7/mo always-on | yes, free TLS | free tier does | Least work if you want it live in an hour. `render.yaml` is committed. |
+| **Google Cloud Run** | pay-per-request | yes, via load balancer | scales to zero | Most fiddly; domain mapping goes through a load balancer. |
 
-For a first launch from Singapore I would pick **Fly.io** (`sin` region)
-or **Railway**. Render is the least work if you want it running in an hour.
-
-### The start command, whichever you pick
-
-```
-streamlit run app_v30.py --server.port $PORT --server.address 0.0.0.0 \
-  --server.headless true --server.enableCORS false \
-  --server.enableXsrfProtection true
-```
-
-`$PORT` is supplied by the platform. Do not hardcode 8501.
-
----
+For a Singapore audience I would pick **Fly.io**. `fly launch --no-deploy`
+then `fly deploy` and it reads `fly.toml`.
 
 ## 1. The domain itself
 
@@ -58,16 +80,28 @@ feel obliged to buy from Google just because you are deploying there.
 `.com` runs about US$10–15/year. Budget for the renewal, not the
 first-year promo price.
 
-**DNS**, once you have it:
+**DNS at Namecheap**, step by step:
 
 1. In your host's dashboard, add the custom domain. It gives you a target
-   — either a `CNAME` value or an `A` record IP.
-2. At your registrar, create that record. Use `@` for the apex
-   (`tickveil.com`) and `www` for the subdomain, pointing both at the
-   host.
-3. TLS is automatic and free on all four hosts above. Do not buy a
-   certificate.
-4. Propagation is usually minutes, occasionally an hour.
+   — on Fly it is usually an `A` record IP plus an `AAAA`; on Render and
+   Railway it is a `CNAME` hostname.
+2. Namecheap → **Domain List** → *Manage* → **Advanced DNS**.
+3. Delete the two parking records Namecheap adds by default (a `CNAME`
+   for `www` pointing at `parkingpage.namecheap.com`, and a `URL
+   Redirect`). Leaving them in place is the most common reason a new
+   domain keeps showing a parking page after everything else is right.
+4. Add your host's records:
+   - Host `@` → the apex (`tickveil.com`)
+   - Host `www` → the same target
+   Namecheap writes `@` for the apex; you do not type the domain itself.
+5. Set TTL to **Automatic** while you are setting up — a long TTL means a
+   mistake takes hours to correct.
+6. Back in your host's dashboard, click *verify* / *check DNS*. TLS is
+   issued automatically and free. **Do not buy an SSL certificate from
+   Namecheap** — you do not need one, and the upsell is prominent.
+
+Propagation is usually minutes. `dig tickveil.com +short` tells you what
+the world currently sees.
 
 **Put Cloudflare in front of it** (free plan). You get DDoS absorption, a
 WAF, and caching, none of which you have today. Set SSL/TLS mode to
@@ -79,18 +113,31 @@ Cloudflare and your host unencrypted, which defeats the point.
 ## 2. Postgres, before you launch, not after
 
 Right now accounts live in JSON files on the container's disk. **Every
-host above wipes that disk on redeploy.** The first time you push a fix,
-every account, watchlist and journal entry is gone, with no error and
-nothing to restore.
+host above replaces that disk on redeploy.** The first time you push a
+fix, every account, watchlist and journal entry is gone, with no error
+and nothing to restore.
 
-The app already supports Postgres — set `DATABASE_URL` and it switches
-backends with no code change. Free tiers that are genuinely enough:
-**Neon**, **Supabase**, or your host's own add-on.
+The app already supports Postgres: set `DATABASE_URL` and it switches
+backend with no code change. This was tested properly rather than
+assumed — against a real PostgreSQL 16 server, the app creates accounts,
+refuses duplicates, round-trips every document kind, and signs a user in
+through the browser on the Postgres backend with no JSON files present.
 
-There is a migration helper in `storage.py`
-(`migrate_json_to_postgres`) if you want to carry existing accounts over.
+**Migrating existing accounts.** `storage.migrate_json_to_postgres`
+copies them over. Also tested: two accounts with watchlists, preferences
+and a journal moved across with bcrypt hashes and TOTP flags intact, and
+running it a second time moved nothing and skipped both — it is
+idempotent, so it is safe to leave wired into startup.
 
----
+```python
+import os, storage
+pg = storage.PostgresStorage(os.environ["DATABASE_URL"])
+pg.ensure_schema()
+print(storage.migrate_json_to_postgres(pg))
+```
+
+Free tiers that are genuinely enough to launch on: **Neon**, **Supabase**,
+or your host's own add-on. Append `?sslmode=require` to the URL.
 
 ## 3. Sign in with Google
 
@@ -180,7 +227,29 @@ between you and a rate limit.
 
 ---
 
-## 6. Security checklist before you point a domain at it
+## 6. Run the preflight check
+
+```bash
+DATABASE_URL="postgresql://..." python preflight.py
+```
+
+It answers one question — *if I point a domain at this right now, what
+breaks?* — and is meant to be run against the live deployment's
+environment, not your laptop's, because the configuration that matters is
+the one the running container has.
+
+Exit 0 means nothing is blocking. Exit 1 means at least one BLOCKER:
+something that loses user data or leaves the app insecure. Right now, with
+no database configured, it reports exactly one blocker, which is the
+Postgres item above.
+
+It checks dependencies, the database connection, that no secret or user
+data is tracked by git, that `cookie_secret` is real randomness rather
+than the placeholder, that the OAuth redirect is https, that the PayNow
+payee actually produces a valid QR, and that all eight static test suites
+pass.
+
+## 7. Security checklist before you point a domain at it
 
 Already done:
 
@@ -197,6 +266,7 @@ Already done:
 Do before launch:
 
 - [ ] **Postgres** (section 2) — the highest-priority item on this page
+- [ ] **Run `python preflight.py` against the deployed environment**
 - [ ] **Change the `Isaac77` password.** Its bcrypt hash is in git history
       at commit `319affb`. Rewriting history will not reliably remove it
       from forks or caches; changing the password is what actually fixes it.
@@ -210,6 +280,14 @@ Do before launch:
       third you have; the first two are a page of text.
 - [ ] **Decide the data story** (section 5) before you advertise accuracy
 
+Done since this guide was first written:
+
+- [x] Streamlit's own chrome removed, real favicon, own page title
+- [x] `Dockerfile`, `fly.toml`, `render.yaml` — host is now swappable
+- [x] Postgres backend and the JSON migration both tested end to end
+- [x] `preflight.py` to check a deployment before pointing DNS at it
+- [x] Container runs as a non-root user
+
 Worth adding soon, not blocking:
 
 - [ ] Idle session timeout
@@ -220,12 +298,20 @@ Worth adding soon, not blocking:
 
 ---
 
-## 7. Order I would actually do it in
+## 8. Order I would actually do it in
 
-1. Postgres (an afternoon) — everything else is pointless without it
-2. Move to Fly.io or Railway (an afternoon)
-3. Buy the domain, point DNS, add Cloudflare (an hour)
-4. Google sign-in (fifteen minutes)
-5. Twelve Data or Finnhub instead of yfinance (a day)
-6. Email via Resend, then password reset (half a day)
-7. Apple sign-in — only if people ask
+1. **Postgres** (an hour) — nothing else matters if accounts vanish.
+   Create a Neon database, copy the URL.
+2. **Deploy the container** (an hour). `fly launch --no-deploy`, set
+   `DATABASE_URL` with `fly secrets set`, `fly deploy`.
+3. **`python preflight.py`** against it. Fix anything it calls a blocker.
+4. **Buy the domain at Namecheap, point DNS, add Cloudflare** (an hour).
+5. **Google sign-in** (fifteen minutes) — now that you have a real
+   redirect URI to register.
+6. **Change the `Isaac77` password.**
+7. **Twelve Data or Finnhub instead of yfinance** (a day). This is the
+   one that decides whether the product is honest about its numbers.
+8. **Email via Resend, then password reset** (half a day).
+9. **Apple sign-in** — only if people ask.
+
+Steps 1–5 are a weekend. Step 7 is the one worth doing properly.

@@ -1,0 +1,16 @@
+# Render. Connect the repo and it reads this automatically.
+services:
+  - type: web
+    name: tickveil
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: singapore
+    # The free plan sleeps after inactivity, which means a ~30s cold start
+    # on any link you share. Starter is the first plan that stays awake.
+    plan: starter
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: DATABASE_URL
+        sync: false     # set in the dashboard, never in this file
