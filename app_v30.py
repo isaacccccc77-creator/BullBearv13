@@ -22,6 +22,7 @@ import quant
 import deals
 import theming
 import payments
+import identity
 
 # Stamped before any work happens so the status bar can report how long a
 # rerun actually took. Streamlit re-executes this entire file on every
@@ -1452,6 +1453,22 @@ html, body,
 [data-testid="stHeader"] { background: transparent !important; }
 body { color: var(--text-200); }
 
+/* The rule between federated buttons and the password form. */
+.tv-auth-or {
+    position: relative; text-align: center;
+    margin: 1.15rem 0 0.9rem;
+}
+.tv-auth-or::before {
+    content: ""; position: absolute; left: 0; right: 0; top: 50%;
+    height: 1px; background: var(--line);
+}
+.tv-auth-or span {
+    position: relative; padding: 0 0.8rem;
+    background: var(--ink-950);
+    font-family: var(--font-ui); font-size: 0.56rem;
+    letter-spacing: 0.22em; text-transform: uppercase; color: var(--text-500);
+}
+
 /* --- Sign-in: what is inside ---------------------------------------
    A belt of capability cards below the form. Grid rather than columns, so
    it reflows from four across to one without a breakpoint deciding when —
@@ -2217,6 +2234,95 @@ store = get_store()
 
 # Only show the login/register screen if not already authenticated —
 # avoids flashing it after a successful login on rerun.
+def oauth_providers() -> list[str]:
+    """
+    Which OIDC providers are configured, if any.
+
+    Streamlit reads these from an [auth] block in secrets.toml. Nothing
+    is assumed present: with no secrets file — which is how this runs
+    until real credentials are added — the whole federated path simply
+    does not render, and password sign-in behaves exactly as before.
+    """
+    try:
+        auth = st.secrets.get("auth")
+    except Exception:
+        return []
+    if not auth:
+        return []
+    # Keys other than the providers live alongside them in the same block.
+    reserved = {"redirect_uri", "cookie_secret", "client_id", "client_secret",
+                "server_metadata_url"}
+    try:
+        return sorted(k for k in auth.keys() if k not in reserved)
+    except Exception:
+        return []
+
+
+def provision_federated_account(email: str, name: str) -> str | None:
+    """
+    Finds or creates the local account behind a verified OIDC identity.
+
+    The username is derived from the email by a pure function (see
+    identity.py), so the same person lands on the same account forever
+    with no stored mapping to keep consistent.
+
+    The stored hash is a real bcrypt hash of 32 random bytes that are
+    then discarded. A literal placeholder string would also be unusable —
+    check_password catches the "Invalid salt" error and returns False —
+    but it would return *instantly*, while a password account takes the
+    usual ~250ms of bcrypt. That difference is measurable over a network
+    and would tell an attacker which accounts use single sign-on, which
+    is exactly the set worth phishing. Hashing real randomness costs one
+    bcrypt at account creation and removes the signal.
+    """
+    try:
+        username = identity.derive_username(email)
+    except identity.IdentityError:
+        return None
+    if not store.user_exists(username):
+        store.create_user(username, {
+            "name": name,
+            # Hashed from randomness nobody keeps, so no password can
+            # ever verify and the attempt takes a normal amount of time.
+            "password_hash": hash_password(secrets.token_urlsafe(32)),
+            "totp_enabled": False,
+            "totp_secret": None,
+        })
+    return username
+
+
+# A completed OIDC round trip lands back here with st.user populated. It
+# is checked before the sign-in screen renders, so a returning federated
+# user never sees the form flash before being let through.
+if not st.session_state.get("authenticated"):
+    try:
+        _federated = bool(getattr(st, "user", None) and st.user.is_logged_in)
+    except Exception:
+        _federated = False
+    if _federated:
+        _email = getattr(st.user, "email", None)
+        # An unverified address is not an identity. Google always sets
+        # this; a provider that does not is not trusted to assert the
+        # mailbox belongs to whoever just signed in.
+        _verified = getattr(st.user, "email_verified", True)
+        if _email and _verified:
+            _uname = provision_federated_account(
+                _email, identity.display_name(st.user))
+            if _uname:
+                st.session_state["authenticated"] = True
+                st.session_state["username"] = _uname
+                st.session_state["name"] = identity.display_name(st.user)
+                st.session_state["auth_method"] = "federated"
+                _p = store.get_doc(_uname, "preferences", {}) or {}
+                st.session_state["theme"] = theming.resolve(_p.get("theme"))
+                st.rerun()
+        elif _email and not _verified:
+            st.error(
+                "Your provider did not confirm that address is verified, so "
+                "it cannot be used to sign in. Verify the email with your "
+                "provider and try again."
+            )
+
 if not st.session_state.get("authenticated"):
     # The sign-in screen is the first thing anyone sees, so it carries the
     # brand on its own: an oversized wordmark with a slow specular sweep,
@@ -2255,6 +2361,17 @@ if not st.session_state.get("authenticated"):
     # off, no empty siblings competing for the row, and it stays centred from
     # 320px to a 4K monitor.
     with st.container(key="tv_auth_panel"):
+        _providers = oauth_providers()
+        if _providers:
+            for _p in _providers:
+                if st.button(f"Continue with {identity.provider_label(_p)}",
+                             key=f"oauth_{_p}", use_container_width=True):
+                    st.login(_p)
+            st.markdown(
+                '<div class="tv-auth-or"><span>or use a password</span></div>',
+                unsafe_allow_html=True,
+            )
+
         login_tab, register_tab = st.tabs(["Sign in", "Create account"])
 
         with login_tab:

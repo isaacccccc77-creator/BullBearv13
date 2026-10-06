@@ -126,6 +126,33 @@ expect("rejects a single repeated character", fn["password_problem"]("aaaaaaaaaa
 expect("rejects a keyboard run", fn["password_problem"]("qwertyuiop12") is not None, True)
 expect("accepts a long passphrase", fn["password_problem"]("correct horse battery"), None)
 
+print("\nFederated accounts. The stored hash must be a real bcrypt hash of")
+print("randomness, not a placeholder: a placeholder fails instantly while a")
+print("password account takes ~250ms, and that gap tells an attacker which")
+print("accounts use single sign-on — exactly the set worth phishing.")
+import re as _re2
+_src = SOURCE
+_m = _re2.search(r'def provision_federated_account.*?(?=\ndef |\nif )', _src, _re2.S)
+expect("the helper exists", _m is not None, True)
+if _m:
+    _body = _m.group(0)
+    expect("it hashes real randomness",
+           "hash_password(secrets.token_urlsafe" in _body, True)
+    expect("and stores no literal placeholder hash",
+           "!federated" in _body, False)
+
+import bcrypt as _bcrypt
+_fed = fn.get("hash_password")
+_real = _bcrypt.hashpw(_bcrypt.gensalt(rounds=4), _bcrypt.gensalt(rounds=4))
+expect("a bcrypt hash of randomness verifies False for any password",
+       _bcrypt.checkpw(b"hunter2", _real), False)
+
+print("\nThe OIDC path refuses an unverified email. An address the provider")
+print("will not vouch for is not an identity.")
+expect("the app checks email_verified", "email_verified" in SOURCE, True)
+expect("and only provisions when verified",
+       "if _email and _verified:" in SOURCE, True)
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): {', '.join(failures)}")

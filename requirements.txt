@@ -8,6 +8,10 @@ vaderSentiment
 requests
 bcrypt
 pyotp
+
+# Native OpenID Connect sign-in (st.login / st.user). Only exercised
+# when an [auth] block exists in secrets; the app runs without it.
+Authlib>=1.3.2
 qrcode[pil]
 
 # Postgres backend. Only needed when DATABASE_URL is set — without it the app

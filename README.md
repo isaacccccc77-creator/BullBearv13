@@ -91,12 +91,19 @@ written `0600`, with the mode set at creation rather than chmod-ed afterwards.
 | `test_deals.py` | The deal models: identities, closed-form cases, monotonicities. |
 | `profile_app.py` | Writes an instrumented copy that reports where a rerun went. |
 | `test_layout.py` | Guards the responsive-layout bug class described under Mobile. |
+| `test_theming.py` | Contrast, token completeness, and stable directional colour. |
+| `test_payments.py` | PayNow payloads, against the published CRC check value. |
+| `test_identity.py` | Determinism and normalisation of the email→account mapping. |
 | `storage.py` | Persistence. JSON files or Postgres, chosen by `DATABASE_URL`. |
 | `scoring.py` | The composite score. No Streamlit import, so the maths is testable directly. |
 | `support.py` | Donation links. Validates and host-pins them; handles no money itself. |
+| `theming.py` | Five palettes, with WCAG contrast computed rather than eyeballed. |
+| `payments.py` | PayNow QR: EMVCo payload, CRC-16, proxy validation. |
+| `identity.py` | Maps a verified OIDC email to a stable account key. |
 | `quant.py` | Cointegration, VaR and portfolio optimisation. No Streamlit import. |
 | `deals.py` | LBO, M&A, comparables, value creation, memo. No Streamlit import. |
 | `.streamlit/config.toml` | Base theme (dark, champagne primary). |
+| `DEPLOY.md` | Launching on a domain: hosting, Postgres, OAuth, data feeds. |
 | `requirements.txt` | Dependencies. |
 
 ## What makes it different from a Bloomberg terminal

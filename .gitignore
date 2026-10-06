@@ -22,3 +22,6 @@ venv/
 
 # OS
 .DS_Store
+
+# Never commit real secrets
+.streamlit/secrets.toml
