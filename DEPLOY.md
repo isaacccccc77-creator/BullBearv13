@@ -1,5 +1,9 @@
 # Launching Tickveil on your own domain
 
+> **New to this? Read [LAUNCH.md](LAUNCH.md) instead.** It is the same
+> process written as click-by-click steps with no jargon. This file is
+> the reference you come back to for the detail.
+
 Written in the order you have to do it. Each step says what it costs and
 what it blocks, so you can stop partway and still have something working.
 

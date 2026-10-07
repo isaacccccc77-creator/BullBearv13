@@ -103,6 +103,7 @@ written `0600`, with the mode set at creation rather than chmod-ed afterwards.
 | `quant.py` | Cointegration, VaR and portfolio optimisation. No Streamlit import. |
 | `deals.py` | LBO, M&A, comparables, value creation, memo. No Streamlit import. |
 | `.streamlit/config.toml` | Base theme (dark, champagne primary). |
+| `LAUNCH.md` | The same thing without the jargon. Start here. |
 | `DEPLOY.md` | Launching on a domain: hosting, Postgres, OAuth, data feeds. |
 | `preflight.py` | Pre-launch check: what breaks if a domain is pointed here now. |
 | `Dockerfile` | Portable container, so the host stays a swappable decision. |
