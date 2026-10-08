@@ -356,6 +356,27 @@ expect("a normal name is untouched",
            "Acme Industrial", {}, None, None, None, None,
            deals.recommendation(None, None, None)), True)
 
+print("\nMemo sections number sequentially however many of them exist.")
+print("Several only appear when the model behind them has been run, and a")
+print("memo that reads 1, 2, 3, 5 looks like a page fell out.")
+import re as _re
+def _nums(m): return [int(x) for x in _re.findall(r"^## (\d+)\.", m, _re.M)]
+_sparse = deals.build_memo("Project Lantern", {}, None, None, None, None,
+                           deals.recommendation(None, None, None))
+_n = _nums(_sparse)
+expect("a memo with no models is sequential", _n, list(range(1, len(_n) + 1)))
+_full = deals.build_memo("Project Lantern", {"sector": "Industrials", "ebitda": 1e8},
+                         good, comps, history, levers, rec_good)
+_n2 = _nums(_full)
+expect("a memo with every model is sequential", _n2, list(range(1, len(_n2) + 1)))
+expect("and the full one really does have more sections", len(_n2) > len(_n), True)
+
+print("\nAn absent company snapshot says so, rather than printing six n/a's.")
+expect("empty snapshot explains itself", "No company was loaded" in _sparse, True)
+expect("and emits no n/a bullets", "- Market capitalisation: n/a" in _sparse, False)
+expect("a populated snapshot still lists its facts",
+       "Sector / industry: Industrials" in _full, True)
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): {', '.join(failures)}")

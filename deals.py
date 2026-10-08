@@ -1102,6 +1102,22 @@ DILIGENCE_QUESTIONS = [
 ]
 
 
+def _known(value) -> str | None:
+    """Formats a figure, or None when there is nothing to report."""
+    out = _millions(value)
+    return None if out == "n/a" else out
+
+
+def _counter():
+    """Returns a callable that yields 1, 2, 3 ... on each call."""
+    state = {"n": 0}
+
+    def nxt() -> int:
+        state["n"] += 1
+        return state["n"]
+    return nxt
+
+
 def build_memo(company: str, snapshot: dict, lbo: Optional[LBOResult],
                comps: Optional[dict], history: Optional[pd.DataFrame],
                levers: Optional[pd.DataFrame], rec: dict) -> str:
@@ -1114,6 +1130,11 @@ def build_memo(company: str, snapshot: dict, lbo: Optional[LBOResult],
     populated from a model elsewhere in this file, so the memo cannot
     drift away from the numbers it is describing.
     """
+    # Numbered as they are emitted, not in advance: several sections only
+    # appear when the model behind them has been run, and a memo that reads
+    # 1, 2, 3, 5 looks like a page fell out.
+    section = _counter()
+
     lines = [
         f"# Investment memo — {_safe(company)}",
         "",
@@ -1121,29 +1142,36 @@ def build_memo(company: str, snapshot: dict, lbo: Optional[LBOResult],
         "",
     ]
 
-    sector = _safe(snapshot.get("sector")) or "n/a"
-    industry = _safe(snapshot.get("industry")) or "n/a"
-    lines += [
-        "## 1. The business",
-        "",
-        f"- Sector / industry: {sector} — {industry}",
-        f"- Market capitalisation: {_millions(snapshot.get('market_cap'))}",
-        f"- Enterprise value: {_millions(snapshot.get('enterprise_value'))}",
-        f"- Revenue: {_millions(snapshot.get('revenue'))}",
-        f"- EBITDA: {_millions(snapshot.get('ebitda'))}",
-        f"- Net debt: {_millions(snapshot.get('net_debt'))}",
-        "",
+    # Only the facts that are actually known. Six "n/a" bullets read as a
+    # broken page; saying the company was not loaded reads as a state.
+    facts = [
+        ("Sector / industry",
+         f"{_safe(snapshot.get('sector'))} — {_safe(snapshot.get('industry'))}"
+         if snapshot.get("sector") else None),
+        ("Market capitalisation", _known(snapshot.get("market_cap"))),
+        ("Enterprise value", _known(snapshot.get("enterprise_value"))),
+        ("Revenue", _known(snapshot.get("revenue"))),
+        ("EBITDA", _known(snapshot.get("ebitda"))),
+        ("Net debt", _known(snapshot.get("net_debt"))),
     ]
+    known = [(k, v) for k, v in facts if v]
+    lines += [f"## {section()}. The business", ""]
+    if known:
+        lines += [f"- {k}: {v}" for k, v in known]
+    else:
+        lines += ["*No company was loaded — the figures below come from the "
+                  "assumptions entered by hand rather than from filings.*"]
+    lines += [""]
 
-    lines += ["## 2. Why this could work", ""]
+    lines += [f"## {section()}. Why this could work", ""]
     lines += [f"- {s}" for s in rec["supports"]] or ["- Nothing in the model supports the case."]
-    lines += ["", "## 3. Why it might not", ""]
+    lines += ["", f"## {section()}. Why it might not", ""]
     lines += [f"- {c}" for c in rec["concerns"]] or ["- No modelled concern flagged."]
     lines += [""]
 
     if comps is not None and not comps["football_field"].empty:
         lines += [
-            "## 4. Valuation",
+            f"## {section()}. Valuation",
             "",
             f"Blended peer-implied value of {comps['blended_value']:,.2f} per share against "
             f"a {comps['current_price']:,.2f} market price "
@@ -1156,7 +1184,7 @@ def build_memo(company: str, snapshot: dict, lbo: Optional[LBOResult],
     if lbo is not None:
         a = lbo.assumptions
         lines += [
-            "## 5. Returns",
+            f"## {section()}. Returns",
             "",
             f"Entry at {a.entry_multiple:.1f}x EBITDA with {a.debt_turns:.1f} turns of debt; "
             f"exit at {a.exit_multiple:.1f}x after {a.hold_years} years.",
@@ -1176,10 +1204,10 @@ def build_memo(company: str, snapshot: dict, lbo: Optional[LBOResult],
         lines += ["", lbo_verdict(lbo), ""]
 
     if history is not None and not history.empty:
-        lines += ["## 6. Operating history", "", operating_verdict(history), ""]
+        lines += [f"## {section()}. Operating history", "", operating_verdict(history), ""]
 
     if levers is not None and not levers.empty:
-        lines += ["## 7. Value creation plan", ""]
+        lines += [f"## {section()}. Value creation plan", ""]
         for _, row in levers.iterrows():
             lines.append(
                 f"- **{row['Lever']}** ({row['Gap']}): "
@@ -1189,7 +1217,7 @@ def build_memo(company: str, snapshot: dict, lbo: Optional[LBOResult],
             )
         lines += [""]
 
-    lines += ["## 8. Diligence questions", ""]
+    lines += [f"## {section()}. Diligence questions", ""]
     for topic, question in DILIGENCE_QUESTIONS:
         lines.append(f"- **{topic}.** {question}")
 
