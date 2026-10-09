@@ -212,6 +212,11 @@ def _rgba(hex_colour: str, alpha: float) -> str:
     return f"rgba({_rgb(hex_colour)}, {alpha})"
 
 
+def rgba(hex_colour: str, alpha: float) -> str:
+    """A palette colour at a given opacity, for callers outside this module."""
+    return _rgba(hex_colour, alpha)
+
+
 def _rgb(hex_colour: str) -> str:
     h = hex_colour.lstrip("#")
     return ", ".join(str(int(h[i:i + 2], 16)) for i in (0, 2, 4))

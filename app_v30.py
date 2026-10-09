@@ -9,6 +9,7 @@ tension between different signals — they are not forecasts. This is not
 financial advice.
 """
 
+import math
 import os
 import re
 import time
@@ -22,6 +23,7 @@ import support
 import quant
 import deals
 import theming
+import verdict
 import payments
 import identity
 
@@ -36,6 +38,7 @@ import pyotp
 import qrcode
 import html as html_lib
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -2782,6 +2785,62 @@ with _head_toggle:
     )
 
 
+def fix_hidden_tab_charts() -> None:
+    """
+    Re-lays-out Plotly charts that were drawn while their tab was hidden.
+
+    Streamlit renders the body of every tab on each script run, including
+    the ones nobody is looking at. A hidden tab has zero width, so Plotly
+    cannot measure a container and falls back to its built-in 700px — and
+    because nothing resizes when the reader later clicks that tab, the
+    chart stays 700px inside a 1,200px column for the rest of the session.
+    Measured here as a chart filling 59% of its own container.
+
+    Streamlit's own container sizing does not help: the wrapper div is the
+    right width all along, it is the <svg> inside it that is stale. So the
+    fix watches each plot for a width change and asks Plotly to re-measure.
+
+    Injected once per session; the guard on window.parent survives the
+    reruns that would otherwise stack a new observer on every click.
+    """
+    components.html(
+        """<script>
+        (function () {
+          var win = window.parent, doc = win.document;
+          if (win.__tvPlotlyResize) { return; }
+          win.__tvPlotlyResize = true;
+          var seen = new WeakSet();
+          function fix(el) {
+            try {
+              var w = el.getBoundingClientRect().width;
+              var svg = el.querySelector('svg.main-svg');
+              if (w > 1 && svg && Math.abs(parseFloat(svg.getAttribute('width')) - w) > 2) {
+                win.Plotly.Plots.resize(el);
+              }
+            } catch (e) {}
+          }
+          function sweep() {
+            doc.querySelectorAll('.js-plotly-plot').forEach(function (el) {
+              fix(el);
+              if (seen.has(el)) { return; }
+              seen.add(el);
+              new win.ResizeObserver(function () { fix(el); }).observe(el);
+            });
+          }
+          sweep();
+          // Debounced: a tab switch mutates a great many nodes at once, and
+          // sweeping on each one would cost more than the bug.
+          var pending = null;
+          new win.MutationObserver(function () {
+            if (pending) { return; }
+            pending = win.setTimeout(function () { pending = null; sweep(); }, 120);
+          }).observe(doc.body, { childList: true, subtree: true });
+        })();
+        </script>""",
+        height=0,
+    )
+
+
 def explain(text: str) -> None:
     """
     Renders a plain-English gloss for the panel above, when explain mode is on.
@@ -2985,13 +3044,15 @@ current_ticker = (st.session_state.get("analysis_run") or {}).get("ticker", "")
 # Deal Room sits next to Quant Desk because they are the same kind of
 # surface — models with assumptions rather than readouts of what happened
 # — and a reader who understands one will expect the other beside it.
-(tab_analysis, tab_fundamentals, tab_factors, tab_quant, tab_deals,
- tab_tradesetup, tab_journal, tab_watchlist, tab_digest,
+(tab_analysis, tab_fundamentals, tab_factors, tab_buytest, tab_quant,
+ tab_deals, tab_tradesetup, tab_journal, tab_watchlist, tab_digest,
  tab_multiasset, tab_calendar, tab_settings, tab_support) = st.tabs(
-    ["Analysis", "Fundamentals", "Factor Score", "Quant Desk", "Deal Room",
-     "Trade Setup", "Journal", "Watchlist", "Digest",
+    ["Analysis", "Fundamentals", "Factor Score", "Buy Test", "Quant Desk",
+     "Deal Room", "Trade Setup", "Journal", "Watchlist", "Digest",
      "Multi-Asset", "Calendar", "Settings", "Support"]
 )
+
+fix_hidden_tab_charts()
 
 with tab_watchlist:
     if "watchlist_text" not in st.session_state:
@@ -3242,6 +3303,35 @@ def load_daily_data(ticker_symbol: str) -> pd.DataFrame:
     if df.empty:
         raise ValueError(f"No daily data found for ticker '{ticker_symbol}'.")
     return _clean_price_data(df, ticker_symbol)
+
+
+@st.cache_data(ttl=3600, max_entries=32)
+def load_buy_test_history(ticker_symbol: str) -> pd.DataFrame | None:
+    """
+    A longer price history, for the buy test only.
+
+    The one year the rest of the app uses is the right window for reading
+    current conditions and the wrong one for measuring a base rate: after
+    bucketing to the days the signal looked like today, a year leaves
+    roughly a dozen non-overlapping three-week windows, which is not a
+    sample. Five years is still thin but it is honestly thin, and the page
+    refuses to size anything below twenty windows either way.
+
+    Falls back to the one-year frame rather than failing, since a shorter
+    history produces a "not enough evidence" verdict, which is a true
+    answer, while an exception produces no page at all.
+    """
+    try:
+        stock = yf.Ticker(ticker_symbol)
+        df = yf_call_with_retry(lambda: stock.history(period="5y", interval="1d"))
+        if df is not None and not df.empty:
+            return _clean_price_data(df, ticker_symbol)
+    except Exception:
+        pass
+    try:
+        return load_daily_data(ticker_symbol)
+    except Exception:
+        return None
 
 
 @st.cache_data(ttl=120)  # was 60s — still fairly fresh, but fewer calls
@@ -4523,6 +4613,29 @@ def cached_composite_backtest(score: pd.Series, close: pd.Series,
 # explain mode used to re-run this bootstrap. Measured at ~350ms a call,
 # which was a third of every single click. Bounded entries so a long
 # session over many tickers cannot grow without limit.
+# The buy test needs the same technical composite the Factor Score tab
+# builds, but must not depend on that tab's body having executed — tab
+# bodies are guarded by `if run_button`, and a tab that reads a variable
+# another tab happened to define is a NameError waiting for a click.
+@st.cache_data(ttl=3600, max_entries=64, show_spinner=False,
+               hash_funcs={scoring.ScoringConfig: repr})
+def cached_buy_test_signal(daily: pd.DataFrame, cfg) -> pd.Series | None:
+    """The composite score series on its own, for conditioning the odds."""
+    try:
+        score, _ = scoring.technical_score(daily, cfg)
+        series = score.dropna()
+        return series if len(series) >= 120 else None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, max_entries=64, show_spinner=False)
+def cached_measure_odds(signal: pd.Series, close: pd.Series,
+                        horizon_days: int) -> verdict.Odds | None:
+    """Memoised verdict.measure_odds — pure, and re-run on every widget touch."""
+    return verdict.measure_odds(signal, close, horizon_days)
+
+
 @st.cache_data(ttl=3600, max_entries=64, show_spinner=False)
 def historical_signal_check(daily_df: pd.DataFrame, forward_days: int = 5) -> dict | None:
     """
@@ -6141,6 +6254,526 @@ else:
         st.info("Enter a ticker in the command bar at the top of the page and select **Run analysis** to begin.")
     with tab_factors:
         st.info("Enter a ticker in the command bar at the top of the page and select **Run analysis** to begin.")
+
+
+# ----------------------------------------------------------------------
+# BUY TEST
+#
+# The one question a retail reader actually has, answered as arithmetic
+# instead of as a rating. Three things decide it, and only the first is
+# what most tools talk about:
+#
+#   how often the setup has paid   ->  p, W, L measured from history
+#   what it costs to act on it     ->  c, which no scoring model carries
+#   how much to stake              ->  Kelly, haircut for estimation error
+#
+# The maths lives in verdict.py, which imports no Streamlit and is checked
+# against brute-force optima and Monte Carlo in test_verdict.py. This tab
+# is presentation only: every number on it is traceable to one of those
+# functions, and the formulas are printed next to their own output so the
+# reader can disagree with the inputs rather than with a black box.
+# ----------------------------------------------------------------------
+with tab_buytest:
+    st.subheader("Should you buy this — and how much?")
+    explain(
+        "Every other tab tells you what the market is doing. This one answers the question you "
+        "actually have, and it answers it with arithmetic you can check. It needs three numbers: "
+        "how often this setup has worked before, what your broker charges you to act on it, and "
+        "how big your portfolio is. Out comes a position size — sometimes zero."
+    )
+    st.caption(
+        "A scoring model can say a stock looks good and still be useless to you: the same signal "
+        "is worth acting on at one trade size and not at another, because costs are a fixed "
+        "obstacle and an edge is a percentage. That is the gap this page closes."
+    )
+
+    _bt_ticker = st.session_state.get("last_ticker") or ""
+
+    with card():
+        st.markdown("**The whole model, in three lines**")
+        st.caption("Break-even hit rate — how often you must be right before this is worth doing:")
+        st.latex(r"p^{*} \;=\; \frac{L_{net}}{W_{net} + L_{net}}"
+                 r"\qquad\text{where}\quad W_{net} = W(1-t) - c, \;\; L_{net} = L + c")
+        st.caption("Optimal stake — the fraction of the portfolio that compounds fastest:")
+        st.latex(r"f^{*} \;=\; \frac{p\,W_{net} \;-\; (1-p)\,L_{net}}{W_{net}\,L_{net}}")
+        st.caption("What is actually staked — a quarter of it, on the pessimistic end of p, capped:")
+        st.latex(r"f \;=\; \min\!\Big(\text{cap},\;\; \kappa \cdot f^{*}\big(p_{lo}\big)\Big),"
+                 r"\qquad \kappa = \tfrac{1}{4}")
+        st.caption(
+            "W and L are the average gain and average loss of this setup historically, p the share "
+            "that finished up, c the round-trip cost as a fraction of the trade, t the tax on gains. "
+            "The stake formula is edge divided by the product of the payoffs — not the coin-flip "
+            "version p − q/b, which assumes a loser costs you the entire stake. A share that falls "
+            "8% does not, and using the coin-flip formula on a stock overstates the right size by "
+            "roughly a factor of ten."
+        )
+
+    # --- Inputs -------------------------------------------------------
+    st.markdown("##### Your side of it")
+    BROKER_PRESETS = {
+        "Low-cost broker (US stocks)": dict(commission_pct=0.035, commission_min=0.35,
+                                            spread_pct=0.02, fx_pct=0.02),
+        "Typical retail broker": dict(commission_pct=0.08, commission_min=10.0,
+                                      spread_pct=0.03, fx_pct=0.25),
+        "Local broker (higher minimum)": dict(commission_pct=0.28, commission_min=25.0,
+                                              spread_pct=0.05, fx_pct=0.0),
+        "Zero-commission app": dict(commission_pct=0.0, commission_min=0.0,
+                                    spread_pct=0.12, fx_pct=0.50),
+        "Custom": None,
+    }
+
+    bt_in1, bt_in2, bt_in3 = st.columns(3)
+    with bt_in1:
+        bt_trade = st.number_input(
+            "Trade size", min_value=50.0, max_value=5_000_000.0, value=2_000.0, step=250.0,
+            help="What you would put into this one position. The single most under-rated input "
+                 "on the page: a flat commission is a rounding error on a large trade and a "
+                 "wall on a small one.",
+        )
+        bt_portfolio = st.number_input(
+            "Total portfolio", min_value=100.0, max_value=100_000_000.0,
+            value=25_000.0, step=1_000.0,
+            help="Everything you are investing, not just this position. The stake is "
+                 "expressed as a share of this.",
+        )
+    with bt_in2:
+        bt_preset = st.selectbox(
+            "Broker", list(BROKER_PRESETS.keys()), index=1,
+            help="Rough published rates, as a starting point. Replace them with your own — "
+                 "'Zero-commission app' is the instructive one: nothing is free, the cost "
+                 "has just moved into the spread and the currency conversion.",
+        )
+        bt_horizon = st.selectbox(
+            "Holding period", [5, 10, 21, 63, 126],
+            index=2, format_func=lambda d: f"{d} trading days",
+            help="How long you intend to hold. The odds are measured over exactly this window, "
+                 "so changing it changes the answer — as it should.",
+        )
+    with bt_in3:
+        bt_tax = st.slider(
+            "Tax on gains (%)", 0.0, 50.0, 0.0, 1.0,
+            help="Applied to the winning leg only. Zero in jurisdictions without a capital "
+                 "gains tax.",
+        ) / 100.0
+        bt_cap = st.slider(
+            "Cap on any one position (%)", 1.0, 40.0, 10.0, 1.0,
+            help="A hard ceiling, whatever the arithmetic asks for. Kelly assumes the model "
+                 "is right about the stock; this is the only defence against it simply "
+                 "being wrong.",
+        ) / 100.0
+
+    _preset = BROKER_PRESETS[bt_preset]
+    if _preset is None:
+        bt_c1, bt_c2, bt_c3, bt_c4 = st.columns(4)
+        _preset = dict(
+            commission_pct=bt_c1.number_input("Commission (% per leg)", 0.0, 2.0, 0.08, 0.01),
+            commission_min=bt_c2.number_input("Minimum fee (per leg)", 0.0, 100.0, 10.0, 0.5),
+            spread_pct=bt_c3.number_input("Half-spread (% per leg)", 0.0, 2.0, 0.03, 0.01),
+            fx_pct=bt_c4.number_input("FX conversion (% per leg)", 0.0, 3.0, 0.25, 0.05),
+        )
+    bt_costs = verdict.Costs(tax_rate=bt_tax, **_preset)
+    bt_cost_frac = bt_costs.round_trip(bt_trade)
+
+    st.caption(
+        f"Round trip on a {bt_trade:,.0f} trade: **{bt_cost_frac:.2%}** of the position, paid "
+        f"whether it works or not. The position has to clear that before it has made you "
+        f"anything at all."
+    )
+
+    # --- Odds ---------------------------------------------------------
+    st.markdown("##### How this setup has actually paid")
+    bt_odds = None
+    bt_source = ""
+    if _bt_ticker:
+        _bt_daily = load_buy_test_history(_bt_ticker)
+        if _bt_daily is not None and not _bt_daily.empty:
+            # The Factor Score tab lets the reader retune the weights; match
+            # it when it has run so the two tabs cannot disagree about what
+            # the score is, and fall back to the defaults when it has not.
+            _bt_signal = cached_buy_test_signal(_bt_daily, globals().get("fs_cfg", scoring.CFG))
+            if _bt_signal is not None:
+                bt_odds = cached_measure_odds(_bt_signal, _bt_daily["Close"], int(bt_horizon))
+                if bt_odds is not None:
+                    bt_source = (
+                        f"Measured on {_bt_ticker}: every day in its history when the composite "
+                        f"score sat between {bt_odds.band[0]:+.2f} and {bt_odds.band[1]:+.2f} — "
+                        f"where it sits now — and what the price did over the following "
+                        f"{bt_odds.horizon_days} trading days."
+                    )
+
+    if bt_odds is None:
+        st.info(
+            "No measured history to condition on — either no ticker has been run, or there is "
+            "not enough of it. The model still works on figures you set by hand, which is also "
+            "the honest way to explore what *would* have to be true."
+            if not _bt_ticker else
+            f"Not enough usable history for {_bt_ticker} over a {bt_horizon}-day window. "
+            "Set the odds by hand instead."
+        )
+        bt_m1, bt_m2, bt_m3, bt_m4 = st.columns(4)
+        _p = bt_m1.slider("Hit rate (%)", 20.0, 90.0, 55.0, 1.0) / 100.0
+        _w = bt_m2.slider("Average win (%)", 0.5, 40.0, 8.0, 0.5) / 100.0
+        _l = bt_m3.slider("Average loss (%)", 0.5, 40.0, 7.0, 0.5) / 100.0
+        _n = bt_m4.slider("Independent windows", 3, 400, 45, 1)
+        bt_odds = verdict.Odds(
+            hit_rate=_p, avg_win=_w, avg_loss=_l, n_windows=float(_n),
+            n_rows=int(_n * bt_horizon), horizon_days=int(bt_horizon),
+            baseline_hit_rate=0.50, baseline_avg_win=_w, baseline_avg_loss=_l,
+        )
+        bt_source = (
+            "Figures set by hand. Nothing here was measured from market data — treat it as a "
+            "what-would-have-to-be-true exercise, not as evidence about any stock."
+        )
+
+    st.caption(bt_source)
+
+    bt_o1, bt_o2, bt_o3, bt_o4 = st.columns(4)
+    bt_o1.metric(
+        "Hit rate  p", f"{bt_odds.hit_rate:.0%}",
+        delta=f"{(bt_odds.hit_rate - bt_odds.baseline_hit_rate):+.0%} vs any day",
+        help="Share of windows that finished up. The delta is against buying on a random day "
+             "in the same stock — if that gap is near zero, the signal is not the reason for "
+             "the hit rate.",
+    )
+    bt_o2.metric(
+        "Average win  W", f"{bt_odds.avg_win:+.1%}",
+        help="Mean gain across the winning windows, before costs.",
+    )
+    bt_o3.metric(
+        "Average loss  L", f"−{bt_odds.avg_loss:.1%}",
+        help="Mean loss across the losing windows, before costs.",
+    )
+    bt_o4.metric(
+        "Independent windows", f"{bt_odds.n_windows:.0f}",
+        delta=f"from {bt_odds.n_rows:,} overlapping rows", delta_color="off",
+        help="The real sample size. Forward returns measured from consecutive days overlap "
+             "almost entirely, so the row count is not evidence — it is the same evidence "
+             "counted many times.",
+    )
+
+    bt = verdict.assess(bt_odds, bt_trade, bt_portfolio, bt_costs,
+                        max_weight=bt_cap)
+
+    # --- The arithmetic, filled in ------------------------------------
+    st.markdown("##### The arithmetic, filled in")
+    explain(
+        "Each row is one step of the formula above with the numbers substituted. Read it top to "
+        "bottom and you have the whole argument; disagree with any single row and you have found "
+        "exactly where you disagree."
+    )
+    _ledger = pd.DataFrame([
+        {"Step": "Round-trip cost", "Term": "c",
+         "Value": f"{bt.cost_fraction:.2%}",
+         "Where it comes from": f"two legs of {bt_preset.lower()} fees on a {bt_trade:,.0f} trade"},
+        {"Step": "Net average win", "Term": "W(1−t) − c",
+         "Value": f"{bt.w_net:+.2%}",
+         "Where it comes from": f"{bt_odds.avg_win:.2%} gross, less tax, less the round trip"},
+        {"Step": "Net average loss", "Term": "L + c",
+         "Value": f"−{bt.l_net:.2%}",
+         "Where it comes from": f"{bt_odds.avg_loss:.2%} gross, plus the round trip paid anyway"},
+        {"Step": "Break-even hit rate", "Term": "p*",
+         "Value": f"{bt.breakeven:.1%}",
+         "Where it comes from": "L_net ÷ (W_net + L_net) — below this, losing money is the "
+                                "expected outcome"},
+        {"Step": "Measured hit rate", "Term": "p",
+         "Value": f"{bt_odds.hit_rate:.1%}",
+         "Where it comes from": f"{bt_odds.n_windows:.0f} independent {bt_odds.horizon_days}-day windows"},
+        {"Step": "Hit rate, cautiously", "Term": "p_lo",
+         "Value": f"{bt.hit_lower:.1%}",
+         "Where it comes from": "Wilson lower bound — what p could honestly be given how "
+                                "little evidence there is"},
+        {"Step": "Edge per trade", "Term": "p·W_net − (1−p)·L_net",
+         "Value": f"{bt.edge:+.2%}",
+         "Where it comes from": "expected return on the measured hit rate"},
+        {"Step": "Edge, cautiously", "Term": "at p_lo",
+         "Value": f"{bt.edge_lower:+.2%}",
+         "Where it comes from": "the same sum at the pessimistic hit rate. If this is "
+                                "negative, the edge is inside the error bar"},
+        {"Step": "Full Kelly stake", "Term": "f*(p_lo)",
+         "Value": f"{bt.kelly_shrunk:.1%}",
+         "Where it comes from": "edge ÷ (W_net · L_net) — the stake that compounds fastest "
+                                "if these inputs are exact"},
+        {"Step": "Staked", "Term": "min(cap, ¼·f*)",
+         "Value": f"{bt.stake_fraction:.2%}",
+         "Where it comes from": f"a quarter of Kelly, capped at {bt_cap:.0%} of the portfolio"},
+    ])
+    st.dataframe(
+        _ledger, hide_index=True, use_container_width=True,
+        column_config={
+            "Step": st.column_config.TextColumn(width="small"),
+            "Term": st.column_config.TextColumn(width="small"),
+            "Value": st.column_config.TextColumn(width="small"),
+            "Where it comes from": st.column_config.TextColumn(width="large"),
+        },
+    )
+
+    # --- Verdict ------------------------------------------------------
+    _tone = {"buy": "bull", "no": "bear", "thin": "neutral"}[bt.verdict]
+    render_verdict(
+        f"Buy test — {_bt_ticker or 'hand-set assumptions'}",
+        bt.headline, _tone,
+        note=bt.reasons[0] if bt.reasons else "",
+        right=f"{bt.stake_cash:,.0f}" if bt.stake_fraction > 0 else "0",
+        right_sub="position size" if bt.stake_fraction > 0 else "no position",
+    )
+    for _r in bt.reasons[1:]:
+        st.caption(f"· {_r}")
+
+    if bt.verdict == "buy":
+        st.caption(
+            f"That is {bt.stake_fraction:.2%} of a {bt_portfolio:,.0f} portfolio, or about "
+            f"{bt.stake_cash:,.0f}. Note what it is **not**: a claim that the stock will rise. "
+            f"It is the size at which being wrong {(1 - bt_odds.hit_rate):.0%} of the time "
+            f"still compounds upward."
+        )
+
+    bt_f1, bt_f2, bt_f3 = st.columns(3)
+    bt_f1.metric(
+        "Must be right", f"{bt.breakeven:.0%}",
+        delta=f"{(bt_odds.hit_rate - bt.breakeven) * 100:+.0f} pp of headroom"
+              if abs(bt_odds.hit_rate - bt.breakeven) >= 0.005 else "at the line",
+        help="The break-even hit rate. The useful thing about it is that it turns an argument "
+             "about a company into a testable claim about frequency.",
+    )
+    bt_f2.metric(
+        "Costs eat", f"{min(bt.cost_share_of_win, 9.99):.0%} of the average win",
+        help="Frictions as a share of the gross winning trade. Above 100% the winners do not "
+             "win and no stake is defensible.",
+    )
+    bt_f3.metric(
+        "Signal adds", f"{bt.signal_adds * 100:+.0f} pp",
+        delta=(f"unconstrained Kelly wants {bt.kelly_raw:.0%}"
+               if bt.kelly_raw > 1.0 else None),
+        delta_color="off",
+        help="Hit rate above buying on a random day in the same stock. Near zero means the "
+             "returns are the stock's own drift and the signal is decoration.",
+    )
+
+    # --- Why size is the decision -------------------------------------
+    st.markdown("##### Why the trade size is the decision, not a detail")
+    explain(
+        "A flat broker fee does not care how much you invest, so it shrinks as a share of a "
+        "bigger trade. That moves the bar you have to clear. The same stock, the same signal and "
+        "the same day can be worth buying at one size and a coin flip at another."
+    )
+    _curve = verdict.breakeven_curve(bt_odds, bt_costs)
+    _viable = _curve[_curve["Break-even hit rate"] <= bt_odds.hit_rate]
+    _dead = _curve[_curve["Break-even hit rate"] >= 0.999]
+    _xlo, _xhi = float(_curve["Trade size"].min()), float(_curve["Trade size"].max())
+
+    # Everything on this chart is drawn as a trace in data coordinates and
+    # labelled in paper coordinates. Plotly's add_vline/add_vrect take
+    # *log10* of the value on a log axis, which is easy to get wrong and
+    # silently rescales the whole axis when you do — it collapsed this
+    # chart into its left margin once already.
+    def _at(value: float) -> float:
+        """Where a trade size falls across the plot, 0 to 1."""
+        span = math.log10(_xhi) - math.log10(_xlo)
+        if span <= 0:
+            return 0.0
+        return min(1.0, max(0.0, (math.log10(value) - math.log10(_xlo)) / span))
+
+    _fig_be = go.Figure()
+    if not _dead.empty:
+        _dx = float(_dead["Trade size"].max())
+        _fig_be.add_trace(go.Scatter(
+            x=[_xlo, _dx, _dx, _xlo], y=[0, 0, 100, 100],
+            fill="toself", fillcolor=theming.rgba(CHART_ROSE, 0.07),
+            line=dict(width=0), hoverinfo="skip", showlegend=False,
+        ))
+        _fig_be.add_annotation(
+            x=_at(math.sqrt(_xlo * _dx)), xref="paper", y=1.0, yref="paper", yshift=14,
+            text="costs exceed the average win", showarrow=False,
+            font=dict(color=CHART_ROSE, size=10),
+        )
+    _fig_be.add_trace(go.Scatter(
+        x=_curve["Trade size"], y=_curve["Break-even hit rate"] * 100,
+        mode="lines", name="Hit rate you need",
+        line=dict(color=CHART_GOLD, width=2.4),
+        hovertemplate="Trade %{x:,.0f}<br>needs %{y:.1f}%<extra></extra>",
+    ))
+    _fig_be.add_trace(go.Scatter(
+        x=[bt_trade, bt_trade], y=[0, 100], mode="lines",
+        line=dict(color=CHART_STRONG, width=1.4), hoverinfo="skip", showlegend=False,
+    ))
+    _fig_be.add_annotation(
+        x=_at(bt_trade), xref="paper", y=1.0, yref="paper", yshift=14,
+        text=f"your trade · {bt_trade:,.0f}", showarrow=False,
+        font=dict(color=CHART_STRONG, size=10),
+    )
+    _fig_be.add_hline(
+        y=bt_odds.hit_rate * 100, line=dict(color=CHART_JADE, width=1.6, dash="dash"),
+        annotation_text=f"measured {bt_odds.hit_rate:.0%}", annotation_position="top left",
+        annotation_font=dict(color=CHART_JADE, size=10),
+    )
+    _fig_be.add_hline(
+        y=bt.hit_lower * 100, line=dict(color=CHART_MUTED, width=1.2, dash="dot"),
+        annotation_text=f"cautious {bt.hit_lower:.0%}", annotation_position="bottom left",
+        annotation_font=dict(color=CHART_MUTED, size=10),
+    )
+    _fig_be = style_chart(_fig_be, height=380, show_legend=False)
+    _fig_be.update_layout(
+        hovermode="x",
+        xaxis=dict(type="log", title="Trade size", showgrid=False,
+                   range=[math.log10(_xlo), math.log10(_xhi)],
+                   linecolor=CHART_AXIS, automargin=True,
+                   tickmode="array",
+                   tickvals=[100, 300, 1_000, 3_000, 10_000, 30_000],
+                   ticktext=["100", "300", "1,000", "3,000", "10,000", "30,000"],
+                   tickfont=dict(family="JetBrains Mono, monospace", size=10, color=CHART_MUTED)),
+        yaxis=dict(title="Hit rate required (%)", showgrid=True, gridcolor=CHART_GRID,
+                   side="right", automargin=True, range=[40, 102],
+                   tickfont=dict(family="JetBrains Mono, monospace", size=10, color=CHART_MUTED)),
+        margin=dict(l=8, r=78, t=48, b=42),
+    )
+    st.plotly_chart(_fig_be, use_container_width=True)
+    if not _viable.empty:
+        _min_size = float(_viable["Trade size"].min())
+        st.caption(
+            f"The gold line crosses the measured hit rate at about **{_min_size:,.0f}**. Below "
+            f"that, this setup needs to be right more often than it ever has been — not because "
+            f"the stock is different, but because the fees are the same while the position is "
+            f"smaller. Above it the cost curve flattens and size stops mattering."
+        )
+    else:
+        st.caption(
+            f"The gold line never falls below the measured {bt_odds.hit_rate:.0%} at any trade "
+            f"size on this chart. At these costs there is no size that makes this worth doing."
+        )
+
+    # --- The hill -----------------------------------------------------
+    st.markdown("##### How fast the money compounds at each possible stake")
+    explain(
+        "Stake is not a slope where more is always better — it is a hill. A bigger position "
+        "compounds faster up to a point, and past it the losses do enough damage that the "
+        "compounding slows and eventually reverses. The curve below is the long-run growth rate "
+        "per trade at every stake you could take."
+    )
+    if bt.kelly_raw > 1.0:
+        st.caption(
+            f"Worth saying before the chart: the unconstrained formula asks for "
+            f"**{bt.kelly_raw:.0%}** of the portfolio here — {bt.kelly_raw:.1f}× leverage. That "
+            f"is not a bug in the arithmetic, it is what Kelly means on an asset whose losing "
+            f"trade costs {bt_odds.avg_loss:.1%} rather than everything: it would happily "
+            f"borrow to repeat a bet it believes in. It believes in it because it treats p, W "
+            f"and L as facts. They are estimates from {bt_odds.n_windows:.0f} windows, which is "
+            f"the entire reason this page stakes a quarter of Kelly and then caps it at "
+            f"{bt_cap:.0%}."
+        )
+    _g = verdict.growth_curve(bt)
+    if not _g.empty and np.isfinite(_g["Growth"]).any():
+        _fig_g = go.Figure()
+        _fig_g.add_trace(go.Scatter(
+            x=_g["Stake"] * 100, y=_g["Growth"] * 100,
+            mode="lines", name="Growth per trade",
+            line=dict(color=CHART_GOLD, width=2.4),
+            fill="tozeroy", fillcolor=chart_tint(0.05),
+            hovertemplate="stake %{x:.1f}%<br>growth %{y:+.3f}%/trade<extra></extra>",
+        ))
+        _fig_g.add_hline(y=0, line=dict(color=CHART_AXIS, width=1))
+        _g_top = float(_g["Stake"].max())
+        _peak_shown = bt.kelly_raw <= _g_top
+        if _peak_shown:
+            _fig_g.add_vline(
+                x=bt.kelly_raw * 100, line=dict(color=CHART_MUTED, width=1.2, dash="dot"),
+                annotation_text="full Kelly", annotation_position="top right",
+                annotation_font=dict(color=CHART_MUTED, size=10),
+            )
+            if 2 * bt.kelly_raw <= _g_top:
+                _fig_g.add_vline(
+                    x=2 * bt.kelly_raw * 100, line=dict(color=CHART_ROSE, width=1.2, dash="dash"),
+                    annotation_text="twice Kelly — growth gone",
+                    annotation_position="bottom right",
+                    annotation_font=dict(color=CHART_ROSE, size=10),
+                )
+        if bt.stake_fraction > 0:
+            _fig_g.add_vline(
+                x=bt.stake_fraction * 100, line=dict(color=CHART_JADE, width=1.8),
+                annotation_text=f"staked {bt.stake_fraction:.1%}",
+                annotation_position="top left",
+                annotation_font=dict(color=CHART_JADE, size=10),
+            )
+        _fig_g = style_chart(_fig_g, height=360, show_legend=False)
+        _fig_g.update_layout(
+            hovermode="x",
+            xaxis=dict(title="Stake (% of portfolio)", showgrid=False, linecolor=CHART_AXIS,
+                       automargin=True,
+                       tickfont=dict(family="JetBrains Mono, monospace", size=10,
+                                     color=CHART_MUTED)),
+            yaxis=dict(title="Growth per trade (%)", showgrid=True, gridcolor=CHART_GRID,
+                       side="right", automargin=True,
+                       tickfont=dict(family="JetBrains Mono, monospace", size=10,
+                                     color=CHART_MUTED)),
+            margin=dict(l=8, r=86, t=34, b=42),
+        )
+        st.plotly_chart(_fig_g, use_container_width=True)
+        if _peak_shown:
+            st.caption(
+                f"The peak sits at the full Kelly stake of {bt.kelly_raw:.1%}, and the curve "
+                f"returns to zero at about twice that. Someone who doubles the optimal bet does "
+                f"not earn double — they earn nothing, and takes every bit of the volatility "
+                f"for it. The green line is where this page actually stakes: a quarter of "
+                f"Kelly, well to the left, because the peak is only in the right place if p, W "
+                f"and L are exact, and they are estimates from {bt_odds.n_windows:.0f} windows."
+            )
+        else:
+            st.caption(
+                f"The axis stops at 100% of the portfolio, so the peak — {bt.kelly_raw:.0%} — is "
+                f"off to the right along with the point where overbetting turns the growth "
+                f"negative. What is visible is the part a reader without margin can actually "
+                f"reach, and the green line at {bt.stake_fraction:.1%} is what this page takes "
+                f"from it."
+            )
+    else:
+        _fix = (f"a trade size of roughly {float(_viable['Trade size'].min()):,.0f}"
+                if not _viable.empty else
+                "costs lower than any broker on this list charges")
+        st.info(
+            f"There is no hill to draw. Break-even needs {bt.breakeven:.0%} and this setup has "
+            f"managed {bt_odds.hit_rate:.0%}, so growth is negative at every stake — the curve "
+            f"would be a slide, and its highest point would be the left-hand end: no position "
+            f"at all. It becomes a hill again at {_fix}."
+        )
+
+    # --- What it costs ------------------------------------------------
+    with st.expander("Where the round-trip cost actually goes"):
+        _bd = {k: v for k, v in bt_costs.breakdown(bt_trade).items() if v > 0}
+        if _bd:
+            _items = sorted(_bd.items(), key=lambda kv: kv[1])
+            _fig_c = go.Figure(go.Bar(
+                x=[v * 100 for _, v in _items], y=[k for k, _ in _items],
+                orientation="h", marker=dict(color=CHART_GOLD, line=dict(width=0)),
+                text=[f"{v:.2%}" for _, v in _items], textposition="outside",
+                textfont=dict(family="JetBrains Mono, monospace", size=10, color=CHART_TEXT),
+                hovertemplate="%{y}: %{x:.3f}% of the trade<extra></extra>",
+            ))
+            _fig_c = style_chart(_fig_c, height=260, show_legend=False)
+            _fig_c.update_layout(
+                hovermode="closest",
+                xaxis=dict(title="% of the position, round trip", showgrid=True,
+                           gridcolor=CHART_GRID, linecolor=CHART_AXIS, automargin=True,
+                           tickfont=dict(family="JetBrains Mono, monospace", size=10,
+                                         color=CHART_MUTED)),
+                yaxis=dict(showgrid=False, side="left", automargin=True,
+                           tickfont=dict(family="Inter, sans-serif", size=11,
+                                         color=CHART_TEXT)),
+                margin=dict(l=8, r=58, t=20, b=42),
+            )
+            st.plotly_chart(_fig_c, use_container_width=True)
+        st.caption(
+            f"Total {bt.cost_fraction:.2%} of a {bt_trade:,.0f} position, which is "
+            f"{bt_trade * bt.cost_fraction:,.2f} in money. The flat minimum is the term worth "
+            f"watching: it is the same number on every trade, so it is the one that decides "
+            f"whether small positions can ever work."
+        )
+
+    st.caption(
+        "What this page is not: a forecast. It measures how a signal has paid in one stock's own "
+        "history and sizes a position accordingly. A hit rate from the past is an estimate of the "
+        "future with no guarantee attached, the sample behind it is small however many rows it "
+        "came from, and a stake of zero is a legitimate answer that this page gives often. "
+        "Not financial advice."
+    )
 
 
 with tab_watchlist:
