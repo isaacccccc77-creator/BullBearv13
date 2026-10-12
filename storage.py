@@ -248,8 +248,21 @@ class PostgresStorage:
         self.dsn = dsn
         # min_size=0 so a cold app doesn't hold connections it isn't using —
         # free-tier Postgres plans cap connections aggressively.
+        # prepare_threshold=None turns off server-side prepared statements.
+        # psycopg promotes a query to one after its fifth execution, and this
+        # app runs the same handful of queries on every page load, so it
+        # crosses that line within minutes. Managed Postgres connection
+        # poolers (Neon's -pooler endpoint, Supabase's, PgBouncer generally)
+        # run in transaction mode, where a prepared statement created on one
+        # pooled backend is not there on the next — the failure is
+        # `prepared statement "s0" already exists`, it only appears under
+        # real traffic, and it never names pooling as the cause. Hosted
+        # dashboards hand out the pooled string by default, so the safe
+        # default is to work on either one. The cost is a re-plan per query,
+        # which is nothing next to a round trip to another continent.
         self.pool = ConnectionPool(dsn, min_size=0, max_size=5, open=True,
-                                   kwargs={"autocommit": True})
+                                   kwargs={"autocommit": True,
+                                           "prepare_threshold": None})
         self.ensure_schema()
 
     def ensure_schema(self) -> None:

@@ -106,17 +106,94 @@ and 2 are free.
 
 ### Step 1 — The database (free, ~20 min)
 
-**Why first:** without it, every account, watchlist and journal entry is
-wiped every single time you update the app. No error message, no warning.
-This is not optional.
+**Why this is not optional.** Right now the app keeps accounts in JSON
+files on the machine it is running on. Render replaces that machine every
+time you deploy. So without this step: you deploy, and every account,
+watchlist and journal entry is gone. No error, no warning, no way back.
+With it, the data lives somewhere else and the app is disposable.
 
-1. Go to **neon.tech**, sign up with GitHub.
-2. Create a project. Call it `tickveil`. Pick the region closest to
-   Singapore it offers.
-3. It shows you a **connection string** that looks like
-   `postgresql://user:password@ep-something.aws.neon.tech/neondb?sslmode=require`
-4. **Copy it somewhere safe.** You need it twice. It is a password — do
-   not paste it into a chat, a public repo, or a screenshot.
+**You do not run any SQL.** The app creates its own tables the first time
+it connects. Your whole job in this step is to end up holding one long
+string of text and to paste it into Render in Step 2. That is it.
+
+#### 1a. Get the string
+
+1. Go to **neon.tech** and sign in with GitHub.
+2. You may already have a project — if you see one called something like
+   `muddy-shadow-31011498`, open it and skip to 1a.4.
+   Otherwise click **New project**, name it `tickveil`, and pick the
+   region nearest Singapore.
+3. Wait about thirty seconds while it builds.
+4. On the project page there is a **Connect** button, or a panel headed
+   **Connection string**. Click it.
+5. There is a dropdown or toggle offering a **pooled** and a **direct**
+   (sometimes "unpooled") connection. **Either one works.** Take the
+   default. The app is configured to be fine with both, which is not
+   true of every app and is the reason this guide no longer tells you to
+   hunt for a particular one.
+6. There may also be tabs for Next.js, Django, psql and so on. Ignore
+   them. You want the plain string, the one that starts `postgresql://`
+   and looks like:
+
+   ```
+   postgresql://neondb_owner:SOMEPASSWORD@ep-cool-name-123456-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+   ```
+
+7. Click the eye / **Show password** control if the middle of it is
+   dots, then copy the whole thing.
+
+**Treat this like a password, because it is one.** Anyone holding it can
+read and delete every account on your site. Do not paste it into a chat,
+do not commit it, do not leave it in a screenshot. If it does leak, open
+the Neon dashboard and reset the password — the string changes and the
+old one dies.
+
+#### 1b. Where it goes
+
+You will paste it in exactly one place that matters:
+
+* **Render**, as an environment variable named `DATABASE_URL`. That is
+  Step 2, point 7. Nothing else is needed for the live site.
+
+Optionally, to run the app on your own laptop against the same database,
+put it in `.streamlit/secrets.toml`:
+
+```toml
+DATABASE_URL = "postgresql://..."
+```
+
+That file is already in `.gitignore`, so it will not be committed. The
+app looks for the environment variable first and falls back to this.
+
+#### 1c. How to know it actually worked
+
+This is the part people skip and then wonder about six weeks later.
+
+1. Once the site is live (end of Step 2), sign up for an account on it.
+2. Go back to Render and hit **Manual Deploy → Deploy latest commit**.
+3. Wait for it to finish, reload the site, and log in with that same
+   account.
+
+If you are still there, the database is wired up. If you are asked to
+register again, `DATABASE_URL` did not reach the app — check for a typo
+in the variable name, and check Render's **Logs** tab for a line
+mentioning Postgres.
+
+You can also check from the Neon side: its **Tables** view should show
+`users` and `documents` once the app has started once.
+
+#### If something goes wrong
+
+* **"DATABASE_URL is set but psycopg is not installed"** — the build did
+  not install dependencies. Make sure Render is building from the
+  `Dockerfile`, not as a plain Python app.
+* **Connection timeouts** — Neon free-tier databases go to sleep after
+  five minutes idle and take a few seconds to wake. The first request
+  after a quiet night is slow; that is normal, not a fault.
+* **Everything works locally, nothing works live** — almost always the
+  variable name. It is `DATABASE_URL`, all capitals, no spaces around
+  the `=`, and the value must not have quotes around it in Render's box.
+
 
 ### Step 2 — Put the app on a computer (free to try, ~40 min)
 
@@ -128,8 +205,12 @@ can move later.
 1. Go to **render.com**, sign up with GitHub.
 2. **New → Web Service**.
 3. Connect your GitHub and pick `isaacccccc77-creator/BullBearv13`.
-4. Render should detect the `Dockerfile` on its own. If it asks for a
-   Language or Runtime, choose **Docker**.
+4. Render should detect the `Dockerfile` on its own. **Check that it
+   has.** There is now a `package.json` at the top of the repo, left
+   behind by the Neon setup, and Render may read that and decide this is
+   a Node project — it is not, it is Python, and a Node build will fail
+   or produce a site that does nothing. If the Language or Runtime box
+   says anything other than **Docker**, change it to Docker by hand.
 5. Region: **Singapore**.
 6. Instance type: the **free** one is fine to test with. It falls asleep
    after ~15 minutes of no visitors, so the next person waits ~30 seconds
