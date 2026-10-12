@@ -25,3 +25,4 @@ venv/
 
 # Never commit real secrets
 .streamlit/secrets.toml
+node_modules/
