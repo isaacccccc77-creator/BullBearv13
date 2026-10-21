@@ -203,14 +203,17 @@ in a browser and Fly needs the command line. Get it working first; you
 can move later.
 
 1. Go to **render.com**, sign up with GitHub.
-2. **New → Web Service**.
+2. **New → Blueprint.** Not "Web Service" — this matters. The repo
+   contains a `render.yaml`, and Blueprint reads the runtime, region,
+   plan and health check straight out of it. Web Service instead guesses
+   from the repo contents, and since the Neon setup left a `package.json`
+   at the top of this otherwise-Python project, that guess can come back
+   "Node" and build the wrong thing.
 3. Connect your GitHub and pick `isaacccccc77-creator/BullBearv13`.
-4. Render should detect the `Dockerfile` on its own. **Check that it
-   has.** There is now a `package.json` at the top of the repo, left
-   behind by the Neon setup, and Render may read that and decide this is
-   a Node project — it is not, it is Python, and a Node build will fail
-   or produce a site that does nothing. If the Language or Runtime box
-   says anything other than **Docker**, change it to Docker by hand.
+4. Render reads `render.yaml` and shows you what it is about to create:
+   a Docker web service called `tickveil`, in Singapore, on the Starter
+   plan, health-checked at `/_stcore/health`. You should not have to
+   choose a runtime at all.
 5. Region: **Singapore**.
 6. Instance type: the **free** one is fine to test with. It falls asleep
    after ~15 minutes of no visitors, so the next person waits ~30 seconds
@@ -219,8 +222,16 @@ can move later.
 7. Find **Environment** / **Environment Variables** and add one:
    * Key: `DATABASE_URL`
    * Value: the Neon string from Step 1
-8. Click **Create Web Service** and wait. The first build takes
+8. Click **Apply** / **Create** and wait. The first build takes
    5–10 minutes — it is installing pandas, scipy and plotly.
+
+   This image has been built and run end to end, so a failure here is a
+   platform or configuration problem rather than something wrong with
+   the `Dockerfile`: it builds clean, starts, answers
+   `/_stcore/health` with a 200 within about three seconds, runs as a
+   non-root user, and when `DATABASE_URL` is set it selects the Postgres
+   backend and its writes land in the database rather than in a file
+   that a redeploy would erase.
 9. When it finishes you get a URL like `tickveil-abcd.onrender.com`.
    **Open it. Make an account. Check it works.**
 
@@ -243,6 +254,11 @@ At this point you have a working website. It just has an ugly address.
 1. **In Render:** your service → **Settings** → **Custom Domain** → add
    `tickveil.com` and also `www.tickveil.com`. Render shows you what DNS
    records it wants. Leave this tab open.
+
+   Alternatively, skip the clicking: open `render.yaml`, uncomment the
+   `domains:` block at the bottom, put your real domain in it and push.
+   Render picks it up on the next deploy and provisions the certificate
+   itself.
 2. **In Namecheap:** Domain List → **Manage** → **Advanced DNS**.
 3. **Delete the two records Namecheap put there by default.** There will
    be a `CNAME` for `www` pointing at `parkingpage.namecheap.com`, and a

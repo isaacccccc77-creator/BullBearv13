@@ -1,4 +1,15 @@
-# Render. Connect the repo and it reads this automatically.
+# Render Blueprint.
+#
+# Deploy this with New -> Blueprint and point it at the repo, rather than
+# New -> Web Service. The difference matters here: Blueprint reads the
+# runtime, region, plan and health check out of this file, while Web
+# Service guesses them from the repo contents — and since `neon config
+# init` left a package.json at the top of this otherwise-Python project,
+# that guess can come back "Node" and build the wrong thing.
+#
+# The only thing you set by hand is DATABASE_URL, which Render will
+# prompt for because of `sync: false` below. It is a password; it does
+# not belong in this file or in git.
 services:
   - type: web
     name: tickveil
@@ -14,3 +25,12 @@ services:
         value: 8080
       - key: DATABASE_URL
         sync: false     # set in the dashboard, never in this file
+
+    # Once the domain is bought, uncomment these two lines and push.
+    # Render then provisions the domain and the TLS certificate itself,
+    # and shows you the DNS records to paste into Namecheap — which saves
+    # adding them by hand in the dashboard. Keep both the bare name and
+    # the www form; people type both.
+    # domains:
+    #   - tickveil.com
+    #   - www.tickveil.com
