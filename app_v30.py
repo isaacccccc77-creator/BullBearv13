@@ -18,6 +18,7 @@ from contextlib import contextmanager
 import bcrypt
 import storage
 import scoring
+import desk
 import support
 import quant
 import deals
@@ -2985,10 +2986,10 @@ current_ticker = (st.session_state.get("analysis_run") or {}).get("ticker", "")
 # Deal Room sits next to Quant Desk because they are the same kind of
 # surface — models with assumptions rather than readouts of what happened
 # — and a reader who understands one will expect the other beside it.
-(tab_analysis, tab_fundamentals, tab_factors, tab_quant, tab_deals,
+(tab_analysis, tab_fundamentals, tab_factors, tab_desk, tab_quant, tab_deals,
  tab_tradesetup, tab_journal, tab_watchlist, tab_digest,
  tab_multiasset, tab_calendar, tab_settings, tab_support) = st.tabs(
-    ["Analysis", "Fundamentals", "Factor Score", "Quant Desk", "Deal Room",
+    ["Analysis", "Fundamentals", "Factor Score", "Research Desk", "Quant Desk", "Deal Room",
      "Trade Setup", "Journal", "Watchlist", "Digest",
      "Multi-Asset", "Calendar", "Settings", "Support"]
 )
@@ -6120,6 +6121,182 @@ a lot, that gap is the size of the error you would have made by trusting the fam
                     "period is one test, not evidence — and the backtest above is included so you can "
                     "see that for yourself rather than take it on trust."
                 )
+
+        with tab_desk:
+            # ----------------------------------------------------------
+            # RESEARCH DESK
+            #
+            # Seven deterministic analysts argue the ticker, then the Chief
+            # rules from the composite score computed on the Factor Score tab
+            # plus an out-of-sample backtest gate. The logic lives in desk.py,
+            # which imports no Streamlit — see test_desk.py.
+            # ----------------------------------------------------------
+            st.subheader(f"Research Desk — {ticker}")
+            explain(
+                "Seven analysts each argue the stock from their own angle, a bull and a bear pull the "
+                "strongest points together, and a final gate checks whether your score has ever beaten "
+                "simply holding on data it never saw. The ruling comes from your formula and that gate, "
+                "not from whichever side argues louder. If the score has no proven edge, the desk says "
+                "so and points you to the index."
+            )
+
+            with st.expander("Desk settings"):
+                ds_c1, ds_c2 = st.columns(2)
+                with ds_c1:
+                    desk_oos = st.slider("Unseen data held back (%)", 20, 50, 30, 5, key="desk_oos",
+                                         help="The most recent share of history the gate tests on.") / 100
+                    desk_cost = st.slider("Trading cost per side (basis points)", 0, 50, 10, 5,
+                                          key="desk_cost",
+                                          help="Charged every time the position changes.")
+                with ds_c2:
+                    desk_risk = st.slider("Risk per trade (% of account)", 0.25, 3.0, 1.0, 0.25,
+                                          key="desk_risk",
+                                          help="How much a paper trade loses if its stop is hit.")
+                    desk_bench = st.text_input("Benchmark index", value="SPY", key="desk_bench",
+                                               help="The gate also requires beating this on the "
+                                                    "unseen slice. Leave blank to skip.").strip().upper()
+                st.caption(
+                    "Moving these after seeing the gate's answer is tuning on the unseen data, which "
+                    "quietly turns it into seen data. Pick them once, then leave them."
+                )
+
+            desk_cfg = desk.DeskConfig(oos_fraction=desk_oos, cost_bps=float(desk_cost),
+                                       risk_per_trade_pct=float(desk_risk))
+
+            bench_close = None
+            if desk_bench:
+                try:
+                    bench_close = load_daily_data(desk_bench)["Close"]
+                except Exception:
+                    st.caption(f"Could not load benchmark {desk_bench}; the gate skips the index check.")
+
+            with st.spinner("Convening the desk..."):
+                desk_out = desk.run_desk(
+                    daily_df=daily_df, indicator_frame=indicator_frame,
+                    tech_score_series=tech_series, penalty_series=penalty_series,
+                    composite=result, sentiment_sigma=sentiment_sigma,
+                    sentiment_info=sentiment_info, fundamentals=fundamentals,
+                    index_close=bench_close, cfg=fs_cfg, desk_cfg=desk_cfg,
+                )
+            ruling = desk_out["ruling"]
+            reports = {r.name: r for r in desk_out["reports"]}
+
+            # --- The ruling first: it is the one thing a reader takes away ---
+            render_verdict(
+                "The Chief's ruling",
+                ruling["decision"],
+                tone=ruling["tone"],
+                note=ruling["why"],
+                right=f"{ruling['final']:+.2f}" if ruling["final"] is not None else "—",
+                right_sub="your composite score",
+            )
+
+            sb1, sb2, sb3 = st.columns(3)
+            sb1.metric("Bull case (formula weight)", f"{ruling['bull_strength']:.2f}")
+            sb2.metric("Bear case (formula weight)", f"{ruling['bear_strength']:.2f}")
+            sb3.metric("Backtest gate", "Passed" if ruling["gate_passed"] else "Blocked")
+            if ruling["advocates_agree_with_formula"] is False:
+                st.caption(
+                    "The louder advocate disagrees with your score. The ruling follows the score, "
+                    "because the advocates' weights are pre-standardisation shares and the score is "
+                    "the number your formula actually produces."
+                )
+
+            # --- The debate -------------------------------------------------
+            st.subheader("The debate")
+
+            def _render_case(rep):
+                st.markdown(f"**{rep.name}** · {rep.summary}")
+                if not rep.arguments:
+                    st.caption("No points to make.")
+                for a in rep.arguments:
+                    tag = (f"weight {a.weight:+.2f}" if a.scored else "context, unscored")
+                    st.markdown(f"- **{a.claim}** — {a.evidence}  \n"
+                                f"  <span style='opacity:.6;font-size:.85em'>{a.source} · {tag}</span>",
+                                unsafe_allow_html=True)
+
+            deb_bull, deb_bear = st.columns(2)
+            with deb_bull:
+                _render_case(reports["Bull Advocate"])
+            with deb_bear:
+                _render_case(reports["Bear Advocate"])
+
+            # --- The gate ---------------------------------------------------
+            gate_rep = reports["Backtest Gate"]
+            st.subheader("Backtest gate")
+            explain(
+                "The desk pretends it is the start of the unseen period, follows your score with no "
+                "hindsight (holding the stock only on days after the score read mildly positive or "
+                "better), pays trading costs, and compares the result with simply holding. Every check "
+                "below must pass before the desk will even suggest a paper trade."
+            )
+            st.caption(gate_rep.summary)
+            for name, ok, detail in gate_rep.metrics.get("checks", []):
+                st.markdown(f"{'**Pass**' if ok else '**Fail**'} · {name} — {detail}")
+
+            gm = gate_rep.metrics
+            if "oos_strategy" in gm:
+                rows = {
+                    "Follow the score": gm["oos_strategy"],
+                    f"Hold {ticker}": gm["oos_hold"],
+                }
+                if "oos_index" in gm:
+                    rows[f"Hold {desk_bench}"] = gm["oos_index"]
+                perf_df = pd.DataFrame({
+                    k: {"Total return": f"{v['total_pct']:+.1f}%",
+                        "Annualised": f"{v['ann_pct']:+.1f}%",
+                        "Volatility": f"{v['vol_pct']:.1f}%",
+                        "Sharpe": f"{v['sharpe']:.2f}",
+                        "Max drawdown": f"{v['max_dd_pct']:.1f}%"}
+                    for k, v in rows.items()
+                }).T
+                st.dataframe(perf_df, use_container_width=True)
+                st.caption(
+                    f"Unseen period {gm['oos_start']} to {gm['oos_end']} ({gm['n_oos_days']} days). "
+                    f"In the market {gm['oos_exposure_pct']:.0f}% of the time, {gm['oos_entries']} entries, "
+                    f"{gm['cost_bps']:.0f}bp per side. Tests the technical score with the macro haircut; "
+                    "sentiment has no headline archive to rebuild a history from."
+                )
+
+            # --- Paper ticket -----------------------------------------------
+            ticket = ruling.get("ticket")
+            if ticket:
+                st.subheader("Paper ticket")
+                tk1, tk2, tk3, tk4 = st.columns(4)
+                tk1.metric("Side", ticket["side"])
+                tk2.metric("Reference price", money(ticket["reference_price"], currency))
+                tk3.metric("Stop", money(ticket["stop_price"], currency))
+                tk4.metric("Size", f"{ticket['position_pct']:.1f}% of account")
+                st.caption(
+                    f"Sized so hitting the stop costs {ticket['risk_pct']:.2f}% of the account, then cut "
+                    "by the macro haircut. Log it in the Journal tab to track it. This is a paper "
+                    "exercise, not an order and not advice."
+                )
+
+            # --- Each analyst's full report --------------------------------
+            st.subheader("Analyst reports")
+            for name in ("Tape Reader", "Fundamentals Analyst", "News Analyst", "Risk Manager"):
+                rep = reports[name]
+                with st.expander(f"{rep.name} — {rep.role}"):
+                    st.markdown(rep.summary)
+                    for a in rep.arguments:
+                        side_word = {"bull": "For", "bear": "Against"}.get(a.side, "Note")
+                        tag = f"weight {a.weight:+.2f}" if a.scored else "unscored"
+                        st.markdown(f"- {side_word}: **{a.claim}** — {a.evidence} ({tag})")
+                    if name == "Risk Manager" and rep.metrics:
+                        rm = rep.metrics
+                        rc1, rc2, rc3, rc4 = st.columns(4)
+                        rc1.metric("1-day VaR 95%", f"{rm.get('var_1d_pct', float('nan')):.2f}%")
+                        rc2.metric("Expected shortfall", f"{rm.get('es_1d_pct', float('nan')):.2f}%")
+                        rc3.metric("Volatility (1y)", f"{rm.get('ann_vol_pct', float('nan')):.0f}%")
+                        rc4.metric("Max drawdown (1y)", f"{rm.get('max_drawdown_1y_pct', float('nan')):.0f}%")
+
+            st.warning(
+                "The desk is a structured way to argue both sides with your own formula as the judge. "
+                "It is not a forecast, not personalised advice, and never places orders. One stock "
+                "over one unseen period is one test: a pass is a reason to paper-trade, not proof of "
+                "an edge, and a block is the most common, and most honest, answer."
+            )
     except Exception as e:
         if _is_rate_limit_error(e):
             st.error(
@@ -6140,6 +6317,8 @@ else:
     with tab_fundamentals:
         st.info("Enter a ticker in the command bar at the top of the page and select **Run analysis** to begin.")
     with tab_factors:
+        st.info("Enter a ticker in the command bar at the top of the page and select **Run analysis** to begin.")
+    with tab_desk:
         st.info("Enter a ticker in the command bar at the top of the page and select **Run analysis** to begin.")
 
 

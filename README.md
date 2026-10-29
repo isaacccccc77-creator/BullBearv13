@@ -86,6 +86,7 @@ written `0600`, with the mode set at creation rather than chmod-ed afterwards.
 | `test_ordering.py` | Guards the call-before-definition bug class described below. |
 | `test_storage.py` | Same contract asserted against both storage backends, plus the migration. |
 | `test_scoring.py` | Mathematical properties of the composite score, including p-value calibration. |
+| `test_desk.py` | The desk cannot see the future, rejects noise, passes a planted signal, and rules from the formula. |
 | `test_support.py` | Donation-link validation: https only, host-pinned, injection-proof. |
 | `test_quant.py` | The three quant models: null calibration, coverage, optimiser properties. |
 | `test_deals.py` | The deal models: identities, closed-form cases, monotonicities. |
@@ -96,6 +97,7 @@ written `0600`, with the mode set at creation rather than chmod-ed afterwards.
 | `test_identity.py` | Determinism and normalisation of the email→account mapping. |
 | `storage.py` | Persistence. JSON files or Postgres, chosen by `DATABASE_URL`. |
 | `scoring.py` | The composite score. No Streamlit import, so the maths is testable directly. |
+| `desk.py` | Research Desk: seven analysts argue, an out-of-sample gate filters, your composite score rules. No Streamlit import. |
 | `support.py` | Donation links. Validates and host-pins them; handles no money itself. |
 | `theming.py` | Five palettes, with WCAG contrast computed rather than eyeballed. |
 | `payments.py` | PayNow QR: EMVCo payload, CRC-16, proxy validation. |
