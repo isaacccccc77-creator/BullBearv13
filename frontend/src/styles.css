@@ -190,7 +190,7 @@ ul.reasons { margin-top: 10px; }
 .quote { text-align: right; }
 .quote-price { font-family: var(--mono); font-size: 34px; font-weight: 700; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
 .quote-asof { font-size: 12px; color: var(--ink-3); margin-top: 4px; }
-.tabs { display: flex; gap: 6px; overflow-x: auto; padding: 5px; background: var(--surface); border: 1px solid var(--line); border-radius: 99px; scrollbar-width: none; position: sticky; top: 10px; z-index: 5; backdrop-filter: blur(16px); }
+.tabs { display: flex; gap: 6px; overflow-x: auto; padding: 5px; background: rgba(18, 16, 28, 0.86); border: 1px solid var(--line); border-radius: 99px; scrollbar-width: none; position: sticky; top: 10px; z-index: 5; backdrop-filter: blur(16px); }
 .tabs a { padding: 10px 20px; border-radius: 99px; font-weight: 600; font-size: 14.5px; color: var(--ink-2); white-space: nowrap; display: flex; align-items: center; gap: 8px; }
 .tabs a:hover { color: var(--ink); }
 .tabs a.on { background: var(--ink); color: var(--bg); }
