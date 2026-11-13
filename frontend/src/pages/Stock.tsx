@@ -15,7 +15,8 @@ const TABS = [
 ];
 const RANGES = ["1M", "3M", "6M", "1Y", "5Y"];
 
-export default function Stock({ ticker, tab, config }: { ticker: string; tab: string; config: Json }) {
+export default function Stock({ ticker, tab: wanted, config }: { ticker: string; tab: string; config: Json }) {
+  const tab = TABS.some(([id]) => id === wanted) ? wanted : "overview";
   const [range, setRange] = useState("1Y");
   const path = encodeURIComponent(ticker);
   const { data, error, loading } = useLoad(`${ticker}:${range}`, (s) => get(`/stock/${path}?range=${range}`, s));
