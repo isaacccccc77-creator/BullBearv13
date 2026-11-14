@@ -131,6 +131,19 @@ def history(ticker: str) -> pd.DataFrame:
     return _clean(_yf_call(lambda: stock.history(period="5y", interval="1d")), ticker)
 
 
+@ttl_cache(3600, max_entries=64)
+def history_long(ticker: str) -> pd.DataFrame:
+    """
+    Every daily bar the feed has. The forecast test needs decades: a monthly
+    call is one data point a month, and grading it fairly takes hundreds.
+    """
+    if DEMO:
+        return _demo_history(ticker, days=5040)
+    import yfinance as yf
+    stock = yf.Ticker(ticker)
+    return _clean(_yf_call(lambda: stock.history(period="max", interval="1d")), ticker)
+
+
 @ttl_cache(900)
 def info(ticker: str) -> dict:
     """Company facts. Every field may be None."""

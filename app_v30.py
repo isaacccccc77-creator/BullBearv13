@@ -23,6 +23,8 @@ import support
 import quant
 import deals
 import theming
+import altair as alt
+import forecast
 import verdict
 import payments
 import identity
@@ -3332,6 +3334,41 @@ def load_buy_test_history(ticker_symbol: str) -> pd.DataFrame | None:
         return load_daily_data(ticker_symbol)
     except Exception:
         return None
+
+
+@st.cache_data(ttl=3600, max_entries=16, show_spinner=False)
+def load_full_history(ticker_symbol: str) -> pd.DataFrame:
+    """
+    Every daily bar Yahoo has, for the Forecast Lab only. A monthly call is
+    one data point a month, so grading one fairly takes decades of them.
+    """
+    stock = yf.Ticker(ticker_symbol)
+    df = yf_call_with_retry(lambda: stock.history(period="max", interval="1d"))
+    if df is None or df.empty:
+        raise ValueError(f"No price history found for '{ticker_symbol}'.")
+    return _clean_price_data(df, ticker_symbol)
+
+
+# The walk-forward retrains a few hundred times, a few seconds of work, and
+# Streamlit re-runs this file on every click. Cached on the price frame, so
+# one ticker is trained once an hour however much the page is touched.
+@st.cache_data(ttl=3600, max_entries=16, show_spinner=False)
+def cached_forecast_lab(daily: pd.DataFrame) -> dict | None:
+    wf = forecast.walk_forward(daily)
+    if wf is None:
+        return None
+    tech, _ = scoring.technical_score(daily, scoring.CFG)
+    grades = forecast.grade(wf, tech)
+    headline, tone, detail = forecast.describe(grades)
+    last = len(wf.prob) - 1
+    return {
+        "grades": grades, "headline": headline, "tone": tone, "detail": detail,
+        "strategy": forecast.strategy(wf, daily["Close"]),
+        "persistence": forecast.persistence_check(daily["Close"]),
+        "coefficients": forecast.coefficient_grid(wf),
+        "today": {"date": wf.dates[last], "prob": float(wf.prob[last]),
+                  "base_rate": float(wf.base_rate[last])},
+    }
 
 
 @st.cache_data(ttl=120)  # was 60s — still fairly fresh, but fewer calls
@@ -6974,8 +7011,8 @@ with tab_quant:
         unsafe_allow_html=True,
     )
 
-    sub_pairs, sub_var, sub_opt = st.tabs(
-        ["Statistical Arbitrage", "Value at Risk", "Portfolio Optimiser"])
+    sub_pairs, sub_var, sub_opt, sub_lab = st.tabs(
+        ["Statistical Arbitrage", "Value at Risk", "Portfolio Optimiser", "Forecast Lab"])
 
     # ==================================================================
     # STATISTICAL ARBITRAGE
@@ -7531,6 +7568,203 @@ after the fix is **4.4%**.
                 "no rebalancing drag — and past covariance is not future covariance."
             )
 
+
+    # ==================================================================
+    # FORECAST LAB
+    #
+    # The design of a Stanford CS230 project (Duemig, "Predicting stock
+    # prices with LSTM Networks") run honestly: 69 features, a next-month
+    # up/down label, walk-forward retraining, and AUC rather than accuracy.
+    # The maths is in forecast.py, tested on markets where the right answer
+    # is known in advance. This block only draws it.
+    # ==================================================================
+    with sub_lab:
+        st.subheader("Can a model call next month?")
+        explain(
+            "A model learns, from decades of this stock's own history, how past returns, volatility "
+            "and volume related to whether the following month went up. It is then tested the only "
+            "fair way: trained on the past, asked about a month it has never seen, graded, moved "
+            "forward a month, and asked again. The question is whether it beats a coin flip."
+        )
+        if not current_ticker:
+            st.info("Load a ticker in the command bar at the top to test a forecast on it.")
+        else:
+            lab, _lab_df = None, None
+            try:
+                with st.spinner("Training on decades of history and testing month by month..."):
+                    _lab_df = load_full_history(current_ticker)
+                    lab = cached_forecast_lab(_lab_df)
+            except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    st.error("Yahoo is rate-limiting right now — try again in a minute.")
+                else:
+                    st.error(f"Couldn't load the full price history for {current_ticker}.")
+
+            if _lab_df is not None and lab is None:
+                st.info(
+                    f"Yahoo has {len(_lab_df) / 252:.1f} years of prices for {current_ticker}. "
+                    "Grading a monthly call fairly needs about seven: two for the 80-week "
+                    "features to warm up, three to train on, two to test."
+                )
+            elif lab is not None:
+                g = lab["grades"]
+                c = g["contenders"]
+                m = c["model"]
+                render_verdict(
+                    f"{current_ticker} · tested {g['test_start']:%b %Y} to {g['test_end']:%b %Y} · "
+                    f"{g['independent_months']} independent months",
+                    lab["headline"],
+                    tone={"positive": "bull", "negative": "bear"}.get(lab["tone"], "neutral"),
+                    note=lab["detail"],
+                    right=f"{m['auc']:.2f}",
+                    right_sub="AUC · coin flip = 0.50",
+                )
+
+                st.markdown("##### The scoreboard")
+                rows = [{"Contender": f'Always say "{c["always"]["says"]}"',
+                         "Accuracy": c["always"]["accuracy"], "AUC": 0.5, "90% range": "—"}]
+                if "factor" in c:
+                    f_ = c["factor"]
+                    rows.append({"Contender": "Factor Score (hand-set weights)",
+                                 "Accuracy": f_["accuracy"], "AUC": f_["auc"],
+                                 "90% range": f"{f_['auc_ci'][0]:.2f} – {f_['auc_ci'][1]:.2f}"})
+                rows.append({"Contender": f"Learned model ({g['n_features']} features, {g['penalty']})",
+                             "Accuracy": m["accuracy"], "AUC": m["auc"],
+                             "90% range": f"{m['auc_ci'][0]:.2f} – {m['auc_ci'][1]:.2f}"})
+                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
+                             column_config={
+                                 "Accuracy": st.column_config.NumberColumn(format="percent"),
+                                 "AUC": st.column_config.NumberColumn(format="%.2f")})
+                st.caption(
+                    "Read AUC, not accuracy. AUC: pick one month that went up and one that went "
+                    "down at random; how often did the contender rate the up-month higher? 0.50 "
+                    "means it cannot tell them apart. When the 90% range straddles 0.50 there is "
+                    "no edge to speak of."
+                )
+
+                ruler = go.Figure()
+                ruler.add_vrect(x0=0.5, x1=0.7, fillcolor=chart_tint(0.04), line_width=0)
+                for name, row, colour in (
+                        [("Learned model", m, CHART_GOLD)]
+                        + ([("Factor Score", c["factor"], CHART_AZURE)] if "factor" in c else [])):
+                    ruler.add_trace(go.Scatter(
+                        x=[row["auc"]], y=[name], mode="markers", name=name,
+                        marker=dict(size=13, color=colour),
+                        error_x=dict(type="data", symmetric=False,
+                                     array=[row["auc_ci"][1] - row["auc"]],
+                                     arrayminus=[row["auc"] - row["auc_ci"][0]],
+                                     color=colour, thickness=2, width=6),
+                        hovertemplate=f"{name}: AUC %{{x:.3f}}<extra></extra>"))
+                ruler.add_vline(x=0.5, line=dict(color=CHART_TEXT, width=1.5, dash="dash"),
+                                annotation_text="coin flip", annotation_position="top")
+                # House style first: it puts the y-axis on the right, which is
+                # right for prices and wrong for row labels.
+                style_chart(ruler, height=220, show_legend=False)
+                ruler.update_xaxes(range=[0.3, 0.7], title_text="AUC, out of sample")
+                ruler.update_yaxes(side="left", showgrid=False, automargin=True)
+                st.plotly_chart(ruler, use_container_width=True)
+
+                t1, t2, t3 = st.columns(3)
+                today = lab["today"]
+                t1.metric("Model's P(next month up)", f"{today['prob'] * 100:.0f}%")
+                t2.metric("Its usual answer", f"{today['base_rate'] * 100:.0f}%",
+                          help="The share of up-months in the data it trained on.")
+                t3.metric("The strategy would be",
+                          "Holding" if today["prob"] > today["base_rate"] else "In cash")
+                st.caption("Weigh this by the scoreboard. A call from a model that grades as a "
+                           "coin flip is a coin flip with decimals.")
+
+                st.markdown("##### What it learned: all 69 weights")
+                grid = lab["coefficients"]
+                heat = go.Figure(go.Heatmap(
+                    z=[grid[f] for f in forecast.FAMILIES],
+                    x=[str(w) for w in forecast.WINDOWS_WEEKS],
+                    y=["Past return", "Volatility", "Volume vs usual"],
+                    zmid=0, colorscale=[[0, CHART_ROSE], [0.5, CHART_GRID], [1, CHART_JADE]],
+                    colorbar=dict(title="weight", thickness=10),
+                    hovertemplate="%{y}, %{x} weeks: %{z:.3f}<extra></extra>"))
+                style_chart(heat, height=250, show_legend=False)
+                heat.update_xaxes(title_text="look-back (weeks)", type="category", showspikes=False)
+                heat.update_yaxes(side="left", showgrid=False, automargin=True, autorange="reversed")
+                st.plotly_chart(heat, use_container_width=True)
+                st.caption(
+                    f"Green pushes toward \"up\", red toward \"down\". {g['n_used']} of "
+                    f"{g['n_features']} features carry weight after the {g['penalty']} penalty. "
+                    "Weights are per standard deviation, so they compare directly."
+                )
+
+                st.markdown("##### If you had traded it")
+                stx = lab["strategy"]
+                # Streamlit's own chart rather than Plotly for the two long time
+                # series: drawn while this sub-tab is hidden, Plotly falls back to
+                # 700px and does not recover, where the native chart sizes to its
+                # column.
+                st.line_chart(stx["equity"].rename(columns={"strategy": "Model strategy",
+                                                            "hold": "Buy and hold"}),
+                              height=320, color=[CHART_GOLD, CHART_MUTED])
+                st.dataframe(pd.DataFrame([
+                    {"": "Model strategy", "Per year": stx["strategy"]["cagr"],
+                     "Volatility": stx["strategy"]["vol"], "Sharpe": stx["strategy"]["sharpe"],
+                     "Worst fall": stx["strategy"]["max_drawdown"]},
+                    {"": "Buy and hold", "Per year": stx["hold"]["cagr"],
+                     "Volatility": stx["hold"]["vol"], "Sharpe": stx["hold"]["sharpe"],
+                     "Worst fall": stx["hold"]["max_drawdown"]},
+                ]), hide_index=True, use_container_width=True, column_config={
+                    "Per year": st.column_config.NumberColumn(format="percent"),
+                    "Volatility": st.column_config.NumberColumn(format="percent"),
+                    "Sharpe": st.column_config.NumberColumn(format="%.2f"),
+                    "Worst fall": st.column_config.NumberColumn(format="percent")})
+                st.warning(
+                    f"Before crediting the model: over {stx['years']:.0f} years a Sharpe ratio is only "
+                    f"known to about ±{stx['sharpe_se']:.2f}, so a smaller gap is noise. And sitting out "
+                    f"{(1 - stx['time_invested']) * 100:.0f}% of the time helps in a falling stock "
+                    "whatever the reason for sitting out: the same time invested on random days "
+                    f"would have made {stx['random_cagr'] * 100:+.1f}% a year."
+                )
+
+                st.markdown("##### The chart that fools people")
+                pc = lab["persistence"]
+                _pc = pd.DataFrame({"date": pc["dates"], "Real price": pc["actual"],
+                                    "Yesterday's price": pc["guess"]}).melt(
+                    "date", var_name="line", value_name="price")
+                st.altair_chart(
+                    alt.Chart(_pc).mark_line(strokeWidth=1.6).encode(
+                        x=alt.X("date:T", title=None),
+                        y=alt.Y("price:Q", title=None, scale=alt.Scale(zero=False)),
+                        color=alt.Color("line:N", title=None, legend=alt.Legend(orient="top"),
+                                        scale=alt.Scale(range=[CHART_GOLD, CHART_AZURE])),
+                        tooltip=["date:T", "line:N", alt.Tooltip("price:Q", format=",.2f")],
+                    ).properties(height=300),
+                    use_container_width=True)
+                p1, p2, p3 = st.columns(3)
+                p1.metric("Explains the price level", f"{pc['r2_level'] * 100:.1f}%")
+                p2.metric("Explains the daily move", f"{pc['r2_move'] * 100:.1f}%")
+                p3.metric("Average miss", f"{pc['mean_abs_error_pct']:.1f}%")
+                st.caption(
+                    "A predicted-versus-real price chart like the ones in the Stanford LSTM papers. "
+                    "This \"forecast\" has no model at all: it copies yesterday's price, and it hugs "
+                    "the real line just as closely. Ask for the R² on the change, not the level."
+                )
+
+                with st.expander("How it was built"):
+                    st.latex(r"P(\text{up}) = \sigma\!\left(b + \textstyle\sum_{j=1}^{69} w_j x_j\right),"
+                             r"\qquad \sigma(z) = \frac{1}{1 + e^{-z}}")
+                    st.markdown(
+                        "- **Features:** past return, volatility and volume over 23 look-backs "
+                        "(1, 2, 3, then every 4th week to 80): 3 × 23 = 69.\n"
+                        "- **Label:** did the next 21 trading days finish up?\n"
+                        "- **Walk-forward:** train on everything before a date, call the next "
+                        "month, slide forward a month, retrain. Never k-fold.\n"
+                        "- **Purge:** a training month whose outcome was still running on the "
+                        "decision date is dropped.\n"
+                        "- **Scaling on the past only,** where the paper used the whole sample.\n"
+                        "- **Volume relative to its own year,** because raw volume trends for "
+                        "decades and jumps at splits.\n"
+                        "- **Penalty:** ridge, lasso or elastic net, chosen by AUC on development "
+                        "months before the test, as the paper did.\n"
+                        "- **No LSTM:** in the paper's own table it matched this plain baseline. "
+                        "The baseline carried the result, and every weight can be shown."
+                    )
 
 
 # ----------------------------------------------------------------------

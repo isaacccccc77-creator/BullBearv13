@@ -98,6 +98,11 @@ def factor(ticker: str):
     return analysis.factor(_ticker(ticker))
 
 
+@app.get("/api/stock/{ticker}/forecast")
+def forecast_lab(ticker: str):
+    return analysis.forecast_lab(_ticker(ticker))
+
+
 class BuyTestIn(BaseModel):
     notional: float = Field(2_000, gt=0, le=10_000_000)
     portfolio: float = Field(20_000, gt=0, le=1_000_000_000)

@@ -108,6 +108,7 @@ export default function Factor({ ticker }: { ticker: string }) {
 
       <Card kicker="Does it work?" title="We tested it. Here is the honest answer.">
         <p className="prose">{d.backtest_reading}</p>
+        <a className="cta" href={`#/s/${encodeURIComponent(ticker)}/lab`}>See it graded the Stanford way, against a learned model <span aria-hidden>→</span></a>
         {!bt.error && (
           <div className="grid-4 tight">
             <Stat label="Days tested" value={num(bt.n_obs, 0)} note={`${bt.n_independent} independent windows`} />

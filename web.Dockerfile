@@ -16,7 +16,7 @@ FROM python:3.11-slim
 WORKDIR /app
 COPY backend/requirements.txt backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt
-COPY scoring.py verdict.py quant.py deals.py ./
+COPY scoring.py verdict.py quant.py deals.py forecast.py ./
 COPY backend/ backend/
 COPY --from=web /web/dist frontend/dist
 

@@ -7,11 +7,12 @@ import { compact, money, num, pct, shortDate } from "../format";
 import Boardroom from "./Boardroom";
 import BuyTest from "./BuyTest";
 import Factor from "./Factor";
+import Lab from "./Lab";
 import Risk from "./Risk";
 
 const TABS = [
   ["overview", "Overview"], ["factor", "Factor Score"], ["buytest", "Buy Test"],
-  ["boardroom", "Boardroom"], ["risk", "Risk"],
+  ["lab", "Forecast Lab"], ["boardroom", "Boardroom"], ["risk", "Risk"],
 ];
 const RANGES = ["1M", "3M", "6M", "1Y", "5Y"];
 
@@ -53,6 +54,7 @@ export default function Stock({ ticker, tab: wanted, config }: { ticker: string;
       ))}
       {tab === "factor" && <Factor ticker={ticker} />}
       {tab === "buytest" && <BuyTest ticker={ticker} currency={data?.currency ?? "USD"} />}
+      {tab === "lab" && <Lab ticker={ticker} />}
       {tab === "boardroom" && <Boardroom ticker={ticker} config={config} />}
       {tab === "risk" && <Risk ticker={ticker} currency={data?.currency ?? "USD"} />}
     </div>

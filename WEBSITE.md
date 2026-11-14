@@ -50,6 +50,7 @@ non-root user, health check passes). On Render: New → Web Service → this rep
 
 ```bash
 python test_backend.py
+python test_forecast.py
 ```
 
 ## Not carried over from the Streamlit app yet

@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 import deals
+import forecast
 import quant
 import scoring
 import verdict
@@ -336,6 +337,67 @@ def lbo(params: dict) -> dict:
 
 
 # ----------------------------------------------------------------------
+# Forecast Lab
+# ----------------------------------------------------------------------
+@market.ttl_cache(3600, max_entries=64)
+def forecast_lab(ticker: str) -> dict:
+    df = market.history_long(ticker)
+    wf = forecast.walk_forward(df)
+    years = len(df) / 252
+    if wf is None:
+        return {"ticker": ticker, "demo": market.DEMO, "status": "thin",
+                "years": years,
+                "message": f"The feed has {years:.1f} years of prices for {ticker}. Grading a "
+                           "monthly call fairly needs about seven: roughly two years for the "
+                           "80-week features to warm up, three to train on, and two to test."}
+
+    tech, _ = scoring.technical_score(df, scoring.CFG)
+    grades = forecast.grade(wf, tech)
+    headline, tone, detail = forecast.describe(grades)
+    strat = forecast.strategy(wf, df["Close"])
+    equity = strat.pop("equity").iloc[::5]
+    pc = forecast.persistence_check(df["Close"])
+    last = len(wf.prob) - 1
+
+    return jsonable({
+        "ticker": ticker, "demo": market.DEMO, "status": "ok", "years": years,
+        "headline": headline, "tone": tone, "detail": detail,
+        "grades": grades,
+        "today": {"date": _day(wf.dates[last]), "prob": wf.prob[last],
+                  "base_rate": wf.base_rate[last],
+                  "invested": bool(wf.prob[last] > wf.base_rate[last])},
+        "windows": list(forecast.WINDOWS_WEEKS),
+        "coefficients": forecast.coefficient_grid(wf),
+        "strategy": strat,
+        "equity": [{"t": _day(i), "strategy": r.strategy, "hold": r.hold}
+                   for i, r in equity.iterrows()],
+        "persistence": {k: pc[k] for k in ("days", "r2_level", "r2_move", "mean_abs_error_pct")}
+                       | {"series": [{"t": _day(d), "actual": a, "guess": g} for d, a, g
+                                     in zip(pc["dates"], pc["actual"], pc["guess"])]},
+    })
+
+
+def _lab_summary(ticker: str) -> dict:
+    try:
+        lab = forecast_lab(ticker)
+    except market.FeedError:
+        return {"status": "unavailable"}
+    if lab["status"] != "ok":
+        return {"status": "not enough history"}
+    c = lab["grades"]["contenders"]
+    return {
+        "note": "Walk-forward test of a 69-feature model (Stanford CS230 design) predicting "
+                "whether the next 21 trading days finish up. AUC 0.5 is a coin flip.",
+        "verdict": lab["headline"],
+        "model_auc": c["model"]["auc"], "model_auc_90pct_range": c["model"]["auc_ci"],
+        "factor_score_auc": c.get("factor", {}).get("auc"),
+        "always_up_accuracy": c["always"]["accuracy"], "model_accuracy": c["model"]["accuracy"],
+        "independent_test_months": lab["grades"]["independent_months"],
+        "today_prob_up": lab["today"]["prob"], "training_up_rate": lab["today"]["base_rate"],
+    }
+
+
+# ----------------------------------------------------------------------
 # Dossier: what the debating agents are given
 # ----------------------------------------------------------------------
 def dossier(ticker: str) -> dict:
@@ -376,6 +438,7 @@ def dossier(ticker: str) -> dict:
             "breakeven_hit_rate": bt.get("breakeven"),
             "suggested_stake_fraction": bt.get("stake_fraction"),
         },
+        "forecast_lab": _lab_summary(ticker),
         "risk": {k: rk[k] for k in ("historical_var_pct", "expected_shortfall_pct",
                                     "vol_annual_pct", "skew", "excess_kurtosis",
                                     "worst_day_pct")},

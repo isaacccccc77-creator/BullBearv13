@@ -45,6 +45,16 @@ for path in ("/api/health", "/api/config", "/api/tape", "/api/stock/AAPL",
         json.dumps(r.json(), allow_nan=False)
     check(path, ok, f"status {r.status_code}")
 
+r = web.get("/api/stock/AAPL/forecast")
+lab = r.json() if r.status_code == 200 else {}
+check("forecast lab answers with strict JSON", r.status_code == 200 and lab.get("status") == "ok"
+      and json.dumps(lab, allow_nan=False) is not None)
+check("the lab grades all three contenders",
+      set(lab.get("grades", {}).get("contenders", {})) == {"always", "model", "factor"})
+check("a random walk is not reported as an edge", lab.get("tone") != "positive", lab.get("headline", ""))
+check("today's call is a probability", 0 < lab.get("today", {}).get("prob", -1) < 1)
+check("all 69 weights are sent for display",
+      sum(len(v) for v in lab.get("coefficients", {}).values()) == 69)
 r = web.post("/api/stock/AAPL/buytest", json={})
 check("buy test with defaults", r.status_code == 200 and r.json()["verdict"] in ("buy", "no", "thin"))
 r = web.post("/api/deals/lbo", json={})
@@ -81,6 +91,10 @@ bt = web.post("/api/stock/AAPL/buytest", json={"notional": 5000, "portfolio": 50
 a = verdict.assess(odds, 5000, 50000, verdict.Costs())
 check("buy test stake", abs(bt["stake_cash"] - a.stake_cash) < 1e-9 and bt["verdict"] == a.verdict)
 check("buy test break-even", abs(bt["breakeven"] - a.breakeven) < 1e-12)
+
+dossier = analysis.dossier("AAPL")
+check("the Boardroom's dossier carries the forecast test",
+      dossier["forecast_lab"].get("model_auc") == lab["grades"]["contenders"]["model"]["auc"])
 
 print("Vote parsing")
 check("a clean line", debate.parse_vote("x\nVOTE | short: HOLD | long: BUY | conviction: 4")

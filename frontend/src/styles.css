@@ -337,6 +337,28 @@ details { margin-top: 16px; } summary { cursor: pointer; color: var(--ink-2); fo
 .after { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 26px; }
 .after small { color: var(--ink-3); font-size: 12.5px; }
 
+/* ---- forecast lab ---- */
+.ruler { position: relative; height: 128px; margin-top: 26px; }
+.ruler-zone { position: absolute; top: 0; height: 104px; border-radius: 12px; background: rgba(57, 168, 104, 0.08); }
+.ruler-zone.bad { background: rgba(226, 77, 108, 0.07); }
+.ruler-zone span { position: absolute; top: 6px; right: 10px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.1em; }
+.ruler-zone.bad span { right: auto; left: 10px; }
+.ruler-mid { position: absolute; top: 0; height: 104px; width: 2px; background: var(--ink); transform: translateX(-1px); }
+.ruler-mid b { position: absolute; top: -20px; left: 50%; transform: translateX(-50%); font-family: var(--mono); font-size: 11px; white-space: nowrap; color: var(--ink); font-weight: 500; }
+.ruler-row { position: absolute; left: 0; right: 0; height: 20px; }
+.whisker { position: absolute; top: 9px; height: 3px; border-radius: 2px; opacity: 0.6; }
+.pip { position: absolute; top: 3px; width: 15px; height: 15px; border-radius: 50%; transform: translateX(-50%); border: 2px solid var(--bg); }
+.pip-label { position: absolute; top: -14px; transform: translateX(-50%); font-family: var(--mono); font-size: 11px; color: var(--ink-2); white-space: nowrap; }
+.ruler-scale { position: absolute; bottom: 0; left: 0; right: 0; display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+.heat-wrap { overflow-x: auto; }
+.heat { border-collapse: separate; border-spacing: 2px; width: 100%; min-width: 420px; }
+.heat th { font-family: var(--mono); font-size: 9.5px; color: var(--ink-3); font-weight: 400; padding: 0 0 4px; }
+.heat th[scope="row"] { text-align: right; padding: 0 8px 0 0; font-family: var(--body); font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.heat td { height: 26px; border-radius: 4px; min-width: 9px; }
+.heat td.off { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+.heat-axis { text-align: right; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-top: 4px; }
+.legend i.hollow { background: transparent !important; box-shadow: inset 0 0 0 1px var(--ink-3); height: 10px; }
+
 /* ---- responsive ---- */
 @media (max-width: 960px) {
   .seats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
